@@ -69,6 +69,73 @@ rotateBlank = [
     [[0,0], [0,0], [0,0], [0,0]]
 ]
 
+attr = [0.0031716211351593346,-1.0,-0.975700323228232,-0.7890873645716108,-0.9075430752097631,-0.909170572114474]
+numHolesWeight = attr[0]      # 空洞数的权重
+pileHeightWeight = attr[1]    # 平均堆高的权重
+wellHeightWeight = attr[2]    # 井深总和的权重
+heightDiffWeight = attr[3]    # 行高差异的权重
+linesClearWeight = attr[4]    # 消除行数的权重
+edgeExposureWeight = attr[5]  # 边缘暴露的权重
+
+def calculateParameters(color, simulatedGrid):
+    """计算当前局面的各项参数"""
+    params = {
+        'numHoles': 0,          # 空洞数量
+        'pileHeight': 0,        # 平均堆高
+        'wellHeight': 0,        # 井深总和
+        'heightDiff': 0,        # 行高差异
+        'linesClear': 0,        # 消除行数
+        'edgeExposure': 0,      # 边缘暴露
+    }
+
+    # 计算各列高度和最大高度
+    columnHeights = [0] * (MAPWIDTH + 2)
+    for x in range(1, MAPWIDTH+1):
+        for y in range(1, MAPHEIGHT+1):
+            if simulatedGrid[y][x]:
+                columnHeights[x] = MAPHEIGHT - y + 1
+                break
+
+    # 空洞检测
+    for x in range(1, MAPWIDTH+1):
+        foundBlock = False
+        for y in range(MAPHEIGHT, 0, -1):
+            if simulatedGrid[y][x]:
+                foundBlock = True
+            elif foundBlock:
+                params['numHoles'] += 1
+
+    # 堆高参数
+    params['pileHeight'] = max(columnHeights)
+
+    # 井深计算
+    for x in range(2, MAPWIDTH):
+        left = columnHeights[x-1]
+        right = columnHeights[x+1]
+        current = columnHeights[x]
+        if current < left and current < right:
+            params['wellHeight'] += min(left, right) - current
+
+    # 行高差异
+    params['heightDiff'] = sum(abs(columnHeights[x] - columnHeights[x+1])
+                                for x in range(1, MAPWIDTH))
+
+    # 边缘暴露（两侧边缘列的高度）
+    params['edgeExposure'] = columnHeights[1] + columnHeights[MAPWIDTH]
+
+    return params
+
+def evaluatePosition(params):
+    """算分"""
+    score = 0
+    score += params['linesClear'] * linesClearWeight
+    score -= params['numHoles'] * numHolesWeight
+    score -= params['pileHeight'] * pileHeightWeight
+    score -= params['wellHeight'] * wellHeightWeight
+    score -= params['heightDiff'] * heightDiffWeight
+    score -= params['edgeExposure'] * edgeExposureWeight
+    return score
+
 class Tetris:
     """方块类，表示一个俄罗斯方块"""
     def __init__(self, blockType, color):
@@ -289,9 +356,17 @@ def canPut(color, blockType):
                     return True
     return False
 
+def simulatePlace(color, blockX, blockY, rotation, blockType):
+    simulated = deepcopy(gridInfo[color])
+    for i in range(4):
+        x = blockX + blockShape[blockType][rotation][2*i]
+        y = blockY + blockShape[blockType][rotation][2*i+1]
+        simulated[y][x] = 2
+    return simulated
+
 def findBestSpot(color, blockType):
     """寻找最佳落点(改进后的策略)"""
-    bestScore = -1
+    bestScore = -float('inf')
     bestX, bestY, bestO = 1, 1, 0
 
     # 遍历所有可能的位置和旋转状态
@@ -300,13 +375,13 @@ def findBestSpot(color, blockType):
             # 找到能落下的最低位置
             for y in range(1, MAPHEIGHT+1):
                 t = Tetris(blockType, color).set(x, y, o)
-                if t.isValid() and checkDirectDropTo(color, blockType, x, y, o):
-                    # 计算这个位置的分数(这里使用简单的最大高度评估)
-                    score = y  # 简单的评分：y越大(越低)越好
+                if t.isValid() and checkDirectDropTo(color, blockType, x, y, o) and t.onGround():
+                    simulated = simulatePlace(color, x, y, o, blockType)
+                    params = calculateParameters(color, simulated)
+                    score = evaluatePosition(params)
                     if score > bestScore:
                         bestScore = score
                         bestX, bestY, bestO = x, y, o
-                    break  # 找到最低位置后跳出
 
     return bestX, bestY, bestO
 
@@ -316,6 +391,7 @@ def main():
 
     # 读取输入
     lines = sys.stdin.read().split('\n')
+
     ptr = 0
 
     # 读取回合数
@@ -383,7 +459,11 @@ def main():
         blockForEnemy = random.choice([i for i in range(7) if i != lastGiven or random.random() < 0.3])
 
     # 输出决策(方块类型, x, y, 旋转状态)
+    for i in range(MAPHEIGHT, 0, -1):
+        print(gridInfo[1][i])
     print(f"{blockForEnemy} {finalX} {finalY} {finalO}")
+
+
 
 if __name__ == "__main__":
     main()
