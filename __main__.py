@@ -182,6 +182,13 @@ class Tetris:
         if not self.onGround():
             return False
 
+        # 将旧方块标记为1
+        for oldY in range(1, MAPHEIGHT):
+            for oldX in range(1, MAPWIDTH+1):
+                # print(f"Now x={oldX},y={oldY}")
+                if gridInfo[self.color][oldY][oldX] == 2:
+                    gridInfo[self.color][oldY][oldX] = 1
+
         # 将方块的4个格子标记为2(表示新放置的方块)
         for i in range(4):
             x = self.blockX + self.shape[self.orientation][2*i]
@@ -265,14 +272,30 @@ def eliminate(color):
     for y in fullRows:
         # 连消奖励(连续3回合有消除)
         if firstFull and elimCombo[color] >= 2:
-            trans[color][count] = [1 if gridInfo[color][y][x] == 1 else 0 for x in range(MAPWIDTH+2)]
+            # 转移行保留边界和原有方块
+            trans[color][count] = [
+                gridInfo[color][y][x] if gridInfo[color][y][x] in (1, -2) else 0
+                for x in range(MAPWIDTH+2)
+            ]
             count += 1
             hasBonus = 1
         firstFull = False
 
         # 将满行加入转移行(去除最后放置的方块)
-        trans[color][count] = [1 if gridInfo[color][y][x] == 1 else 0 for x in range(MAPWIDTH+2)]
+        trans[color][count] = [
+            gridInfo[color][y][x] if gridInfo[color][y][x] in (1, -2) else 0
+            for x in range(MAPWIDTH+2)
+        ]
         count += 1
+
+    # if count != 0:
+    #     print("Full Rows:")
+    #     print(fullRows)
+    #     for i in fullRows:
+    #         print(i, gridInfo[color][i])
+    #     print("\nCurrent Grid:")
+    #     printCurrentGrid(color)
+
 
     transCount[color] = count
     # 更新连消计数
@@ -280,19 +303,33 @@ def eliminate(color):
     # 更新总分数
     elimTotal[color] += elimBonus[count - hasBonus] if count - hasBonus < 5 else 7
 
+    if count == 0:
+        return
+
     # 重新构建地图(消除行后下落)
     writeRow = MAPHEIGHT
-    for y in range(MAPHEIGHT, 0, -1):
+    newGrid = [[-2, [0]*MAPWIDTH, -2]]
+    for y in range(1, MAPHEIGHT):
+        # 跳过被消除的行
         if y not in fullRows:
-            newGrid[writeRow] = gridInfo[color][y][:]
+            # 复制整行数据，保留边界
+            newGrid.append(gridInfo[color][y][:])
             writeRow -= 1
 
     # 顶部填充空行
-    for y in range(writeRow, 0, -1):
-        newGrid[y] = [0]*(MAPWIDTH+2)
+    while(len(newGrid) <= MAPHEIGHT):
+        newGrid.append([-2] + [0]*MAPWIDTH + [-2])
 
+    # 更新地图和边界
     gridInfo[color] = newGrid
-    maxHeight[color] -= count - hasBonus  # 更新最大高度
+    # if len(fullRows) != 0:
+    #     print("\nNew Gird:")
+    #     for i in range(MAPHEIGHT, 0, -1):
+    #         print(i, newGrid[i])
+    #     print()
+
+    # 更新最大高度（当前最高方块位置）
+    maxHeight[color] = MAPHEIGHT - writeRow
 
 def transfer():
     """处理双方的行转移"""
@@ -385,6 +422,10 @@ def findBestSpot(color, blockType):
 
     return bestX, bestY, bestO
 
+def printCurrentGrid(player):
+    for i in range(MAPHEIGHT, 0, -1):
+        print(i, gridInfo[player][i])
+
 def main():
     random.seed()
     init()
@@ -407,8 +448,12 @@ def main():
     typeCountForColor[0][blockType] +=1
     typeCountForColor[1][blockType] +=1
 
+    # print(f"i={0}")
+    # printCurrentGrid(1)
+    # print()
+
     # 处理历史回合
-    for _ in range(1, turnID):
+    for i in range(1, turnID):
         currType = [nextTypeForColor[0], nextTypeForColor[1]]
 
         # 读取我方上一步操作
@@ -434,6 +479,15 @@ def main():
         eliminate(1)
         transfer()
 
+        # print(f"i={i},Enemy:")
+        # printCurrentGrid(0)
+        # print()
+
+    # print("\nNow Enemy:")
+    # printCurrentGrid(0)
+    #
+    # print("\nNow Mine:")
+    # printCurrentGrid(1)
 
     # 决策
 
@@ -459,8 +513,6 @@ def main():
         blockForEnemy = random.choice([i for i in range(7) if i != lastGiven or random.random() < 0.3])
 
     # 输出决策(方块类型, x, y, 旋转状态)
-    for i in range(MAPHEIGHT, 0, -1):
-        print(gridInfo[1][i])
     print(f"{blockForEnemy} {finalX} {finalY} {finalO}")
 
 
