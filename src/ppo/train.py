@@ -266,6 +266,7 @@ class PPOTetrisAgent:
                 # 选择动作
                 action, value, log_prob = self.select_action(state, 0)
                 if action is None:  # 没有合法动作
+                    print("没有合法动作")
                     reward = -10
                     done = True
                 else:
@@ -288,7 +289,7 @@ class PPOTetrisAgent:
             if episode % Config.SAVE_INTERVAL == 0 and episode != 0:
                 torch.save(self.policy.state_dict(), f'tetris_ppo_{episode}.pth')
 
-            print(f"Episode {episode}, Reward: {total_reward}")
+            print(f"Episode {episode + 1}, Reward: {total_reward}")
 
 if __name__ == "__main__":
     print("训练开始")
