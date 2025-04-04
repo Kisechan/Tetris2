@@ -1,6 +1,9 @@
 import sys
 import random
 from copy import deepcopy
+import torch
+import numpy as np
+from train import TetrisPolicyNetwork
 
 # 游戏常量定义
 MAPWIDTH = 10      # 地图宽度
@@ -68,73 +71,6 @@ rotateBlank = [
     # 田字型
     [[0,0], [0,0], [0,0], [0,0]]
 ]
-
-attr = [0.0031716211351593346,-1.0,-0.975700323228232,-0.7890873645716108,-0.9075430752097631,-0.909170572114474]
-numHolesWeight = attr[0]      # 空洞数的权重
-pileHeightWeight = attr[1]    # 平均堆高的权重
-wellHeightWeight = attr[2]    # 井深总和的权重
-heightDiffWeight = attr[3]    # 行高差异的权重
-linesClearWeight = attr[4]    # 消除行数的权重
-edgeExposureWeight = attr[5]  # 边缘暴露的权重
-
-def calculateParameters(color, simulatedGrid):
-    """计算当前局面的各项参数"""
-    params = {
-        'numHoles': 0,          # 空洞数量
-        'pileHeight': 0,        # 平均堆高
-        'wellHeight': 0,        # 井深总和
-        'heightDiff': 0,        # 行高差异
-        'linesClear': 0,        # 消除行数
-        'edgeExposure': 0,      # 边缘暴露
-    }
-
-    # 计算各列高度和最大高度
-    columnHeights = [0] * (MAPWIDTH + 2)
-    for x in range(1, MAPWIDTH+1):
-        for y in range(1, MAPHEIGHT+1):
-            if simulatedGrid[y][x]:
-                columnHeights[x] = MAPHEIGHT - y + 1
-                break
-
-    # 空洞检测
-    for x in range(1, MAPWIDTH+1):
-        foundBlock = False
-        for y in range(MAPHEIGHT, 0, -1):
-            if simulatedGrid[y][x]:
-                foundBlock = True
-            elif foundBlock:
-                params['numHoles'] += 1
-
-    # 堆高参数
-    params['pileHeight'] = max(columnHeights)
-
-    # 井深计算
-    for x in range(2, MAPWIDTH):
-        left = columnHeights[x-1]
-        right = columnHeights[x+1]
-        current = columnHeights[x]
-        if current < left and current < right:
-            params['wellHeight'] += min(left, right) - current
-
-    # 行高差异
-    params['heightDiff'] = sum(abs(columnHeights[x] - columnHeights[x+1])
-                                for x in range(1, MAPWIDTH))
-
-    # 边缘暴露（两侧边缘列的高度）
-    params['edgeExposure'] = columnHeights[1] + columnHeights[MAPWIDTH]
-
-    return params
-
-def evaluatePosition(params):
-    """算分"""
-    score = 0
-    score += params['linesClear'] * linesClearWeight
-    score -= params['numHoles'] * numHolesWeight
-    score -= params['pileHeight'] * pileHeightWeight
-    score -= params['wellHeight'] * wellHeightWeight
-    score -= params['heightDiff'] * heightDiffWeight
-    score -= params['edgeExposure'] * edgeExposureWeight
-    return score
 
 class Tetris:
     """方块类，表示一个俄罗斯方块"""
@@ -288,15 +224,6 @@ def eliminate(color):
         ]
         count += 1
 
-    # if count != 0:
-    #     print("Full Rows:")
-    #     print(fullRows)
-    #     for i in fullRows:
-    #         print(i, gridInfo[color][i])
-    #     print("\nCurrent Grid:")
-    #     printCurrentGrid(color)
-
-
     transCount[color] = count
     # 更新连消计数
     elimCombo[color] = count // 2 if count > 0 else 0
@@ -322,11 +249,6 @@ def eliminate(color):
 
     # 更新地图和边界
     gridInfo[color] = newGrid
-    # if len(fullRows) != 0:
-    #     print("\nNew Gird:")
-    #     for i in range(MAPHEIGHT, 0, -1):
-    #         print(i, newGrid[i])
-    #     print()
 
     # 更新最大高度（当前最高方块位置）
     maxHeight[color] = MAPHEIGHT - writeRow
@@ -401,26 +323,99 @@ def simulatePlace(color, blockX, blockY, rotation, blockType):
         simulated[y][x] = 2
     return simulated
 
-def findBestSpot(color, blockType):
-    """寻找最佳落点(改进后的策略)"""
-    bestScore = -float('inf')
-    bestX, bestY, bestO = 1, 1, 0
+def get_state_representation(color, nextTypeForColor):
+    # 当前地图状态
+    grid = np.array(gridInfo[color][1:21, 1:11])  # 去掉边界
 
-    # 遍历所有可能的位置和旋转状态
-    for o in range(4):
-        for x in range(1, MAPWIDTH+1):
-            # 找到能落下的最低位置
-            for y in range(1, MAPHEIGHT+1):
-                t = Tetris(blockType, color).set(x, y, o)
-                if t.isValid() and checkDirectDropTo(color, blockType, x, y, o) and t.onGround():
-                    simulated = simulatePlace(color, x, y, o, blockType)
-                    params = calculateParameters(color, simulated)
-                    score = evaluatePosition(params)
-                    if score > bestScore:
-                        bestScore = score
-                        bestX, bestY, bestO = x, y, o
+    # 当前方块类型
+    current_block = np.zeros(7)
+    current_block[nextTypeForColor[color]] = 1
 
-    return bestX, bestY, bestO
+    # 对方块类型统计
+    enemy_block_stats = np.array(typeCountForColor[1-color])
+
+    # 连消计数
+    combo = np.array([elimCombo[color]])
+
+    # 最大高度
+    height = np.array([maxHeight[color]])
+
+    # 拼接所有特征
+    state = np.concatenate([
+        grid.flatten(),
+        current_block,
+        enemy_block_stats,
+        combo,
+        height
+    ])
+
+    return state
+
+class TetrisAI:
+    def __init__(self, model_path, color):
+        self.model = TetrisPolicyNetwork()  # 使用与训练相同的网络结构
+        self.model.load_state_dict(torch.load(model_path))
+        self.model.eval()
+        self.color = color
+        self.game = None
+
+    def get_state(self):
+        """获取当前游戏状态"""
+        grid = self.game.gridInfo[self.color][1:21, 1:11].flatten()
+        current_block = np.zeros(7)
+        current_block[self.game.nextTypeForColor[self.color]] = 1
+        enemy_stats = np.array(self.game.typeCountForColor[1 - self.color])
+        combo = np.array([self.game.elimCombo[self.color]])
+        height = np.array([self.game.maxHeight[self.color]])
+        return np.concatenate([grid, current_block, enemy_stats, combo, height])
+
+    def get_legal_actions(self):
+        """获取合法动作"""
+        legal_placements = []
+        block_type = self.game.nextTypeForColor[self.color]
+
+        for x in range(1, 11):
+            for o in range(4):
+                y = self.game.findLowestY(self.color, x, o, block_type)
+                if y != -1 and self.game.checkValidPlacement(self.color, x, y, o, block_type):
+                    legal_placements.append((x, o))
+
+        enemy_counts = self.game.typeCountForColor[1 - self.color]
+        min_count = min(enemy_counts)
+        legal_blocks = [t for t in range(7) if enemy_counts[t] <= min_count + 2]
+
+        return legal_placements, legal_blocks
+
+    def make_decision(self):
+        """做出决策并返回游戏需要的格式"""
+        if not self.game:
+            raise ValueError("Game not attached")
+
+        state = self.get_state()
+        legal_placements, legal_blocks = self.get_legal_actions()
+
+        with torch.no_grad():
+            output = self.model(torch.FloatTensor(state).unsqueeze(0))
+
+        # 动作屏蔽
+        place_probs = np.zeros((10, 4))
+        for x, o in legal_placements:
+            place_probs[x-1, o] = output['placement'][0, x-1, o].item()
+        place_probs /= place_probs.sum()
+
+        block_probs = np.zeros(7)
+        for t in legal_blocks:
+            block_probs[t] = output['block_select'][0, t].item()
+        block_probs /= block_probs.sum()
+
+        # 选择概率最高的动作
+        x, o = np.unravel_index(np.argmax(place_probs), place_probs.shape)
+        x += 1
+        block_type = np.argmax(block_probs)
+
+        y = self.game.findLowestY(self.color, x, o, self.game.nextTypeForColor[self.color])
+
+        return block_type, x, y, o
 
 def printCurrentGrid(player):
     for i in range(MAPHEIGHT, 0, -1):
@@ -448,9 +443,6 @@ def main():
     typeCountForColor[0][blockType] +=1
     typeCountForColor[1][blockType] +=1
 
-    # print(f"i={0}")
-    # printCurrentGrid(1)
-    # print()
 
     # 处理历史回合
     for i in range(1, turnID):
@@ -479,38 +471,10 @@ def main():
         eliminate(1)
         transfer()
 
-        # print(f"i={i},Enemy:")
-        # printCurrentGrid(0)
-        # print()
-
-    # print("\nNow Enemy:")
-    # printCurrentGrid(0)
-    #
-    # print("\nNow Mine:")
-    # printCurrentGrid(1)
-
     # 决策
 
-    # 当前回合决策
-    block = Tetris(nextTypeForColor[currBotColor], currBotColor)
-
-    # 选择落点
-    finalX, finalY, finalO = findBestSpot(currBotColor, block.blockType)
-
-    # 选择给对方的方块类型
-    maxCount = max(typeCountForColor[enemyColor])
-    minCount = min(typeCountForColor[enemyColor])
-
-    if maxCount - minCount == 2:
-        # 如果某种方块太多，选择非最大数量的方块
-        for bt in range(7):
-            if typeCountForColor[enemyColor][bt] != maxCount:
-                blockForEnemy = bt
-                break
-    else:
-        # 随机选择，但避免连续给同一种方块
-        lastGiven = nextTypeForColor[enemyColor]
-        blockForEnemy = random.choice([i for i in range(7) if i != lastGiven or random.random() < 0.3])
+    # 决策选择落点
+    blockForEnemy, finalX, finalY, finalO = 1
 
     # 输出决策(方块类型, x, y, 旋转状态)
     print(f"{blockForEnemy} {finalX} {finalY} {finalO}")
