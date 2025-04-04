@@ -315,6 +315,7 @@ class Tetris2Env:
         # 检查动作合法性
         if not (1 <= x <= self.MAPWIDTH and 1 <= y <= self.MAPHEIGHT and 0 <= o <= 3):
             self.done = True
+            print(f"x={x}, y={y}, o={o}, 动作不合法")
             return -10, True
 
         # 检查方块类型选择是否合法
@@ -322,6 +323,7 @@ class Tetris2Env:
         min_count = min(enemy_counts)
         if enemy_counts[block_for_enemy] > min_count + 2:
             self.done = True
+            print(f"方块类型不合法")
             return -10, True
 
         # 放置当前方块
