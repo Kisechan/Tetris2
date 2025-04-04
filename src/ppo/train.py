@@ -4,7 +4,7 @@ import torch.optim as optim
 import numpy as np
 from collections import deque
 import random
-from tetris2 import Tetris, MAPWIDTH, MAPHEIGHT
+from tetris2_env import Tetris2Env
 
 # 超参数配置
 class Config:
@@ -19,14 +19,15 @@ class Config:
     MAX_EPISODES = 10000
     SAVE_INTERVAL = 100
     HIDDEN_SIZE = 256
+    STATE_DIM = 20*10 + 7 + 7 + 1 + 1  # 网格(200) + 当前方块(7) + 对方统计(7) + 连消(1) + 高度(1)
 
-# 神经网络模型
+# PPO策略网络
 class TetrisPolicyNetwork(nn.Module):
     def __init__(self):
         super().__init__()
-        # 状态编码层
-        self.encoder = nn.Sequential(
-            nn.Linear(20*10 + 7 + 7 + 1 + 1, Config.HIDDEN_SIZE),  # 网格(200) + 当前方块(7) + 对方统计(7) + 连消(1) + 高度(1)
+        # 共享特征提取
+        self.shared = nn.Sequential(
+            nn.Linear(Config.STATE_DIM, Config.HIDDEN_SIZE),
             nn.ReLU()
         )
 
@@ -48,7 +49,7 @@ class TetrisPolicyNetwork(nn.Module):
         self.value_head = nn.Linear(Config.HIDDEN_SIZE, 1)
 
     def forward(self, x):
-        features = self.encoder(x)
+        features = self.shared(x)
 
         # 获取各动作的概率分布
         place_logits = self.placement_head(features).view(-1, 10, 4)
@@ -80,42 +81,26 @@ class PPOTetrisAgent:
         self.policy = TetrisPolicyNetwork()
         self.optimizer = optim.Adam(self.policy.parameters(), lr=Config.LR)
         self.buffer = ReplayBuffer(10000)
-        self.game = Tetris()
-
-    def get_state(self, color):
-        """将游戏状态编码为神经网络输入"""
-        # 网格状态 (20行 × 10列)
-        grid = self.game.gridInfo[color][1:21, 1:11].flatten()
-
-        # 当前方块类型 (one-hot)
-        current_block = np.zeros(7)
-        current_block[self.game.nextTypeForColor[color]] = 1
-
-        # 对方方块统计
-        enemy_stats = np.array(self.game.typeCountForColor[1 - color])
-
-        # 连消计数和最大高度
-        combo = np.array([self.game.elimCombo[color]])
-        height = np.array([self.game.maxHeight[color]])
-
-        return np.concatenate([grid, current_block, enemy_stats, combo, height])
+        self.env = Tetris2Env()
 
     def get_legal_actions(self, color):
         """获取当前所有合法动作"""
         legal_placements = []
-        block_type = self.game.nextTypeForColor[color]
+        block_type = self.env.current_type[color]
 
         # 检查所有可能的放置位置
         for x in range(1, 11):
             for o in range(4):
                 # 找到能落下的最低y位置
-                for y in range(MAPHEIGHT, 0, -1):
-                    if self.game.checkValidPlacement(color, x, y, o, block_type):
+                for y in range(self.env.MAPHEIGHT, 0, -1):
+                    block = self.env.Tetris(self.env, block_type, color)
+                    if (block.set_pos(x, y, o).is_valid() and
+                            self.env.check_direct_drop(color, block_type, x, y, o)):
                         legal_placements.append((x, o))
                         break
 
         # 检查合法的方块类型选择
-        enemy_counts = self.game.typeCountForColor[1 - color]
+        enemy_counts = self.env.type_count[1 - color]
         min_count = min(enemy_counts)
         legal_blocks = [t for t in range(7) if enemy_counts[t] <= min_count + 2]
 
@@ -126,29 +111,49 @@ class PPOTetrisAgent:
         legal_placements, legal_blocks = self.get_legal_actions(color)
 
         with torch.no_grad():
-            output = self.policy(torch.FloatTensor(state))
+            output = self.policy(torch.FloatTensor(state).unsqueeze(0))  # 确保有batch维度
 
         # 应用动作屏蔽
         # 1. 处理放置动作
         place_probs = np.zeros((10, 4))
         for x, o in legal_placements:
             place_probs[x-1, o] = output['placement'][0, x-1, o].item()
-        place_probs /= place_probs.sum()
+        if place_probs.sum() > 0:
+            place_probs = place_probs / place_probs.sum()  # 更安全的归一化方式
 
-        # 2. 处理方块选择
+        # 2. 处理方块选择 - 修复索引
         block_probs = np.zeros(7)
         for t in legal_blocks:
-            block_probs[t] = output['block_select'][0, t].item()
-        block_probs /= block_probs.sum()
+            block_probs[t] = output['block_select'][0][t].item()  # 正确的索引方式
+        if block_probs.sum() > 0:
+            block_probs = block_probs / block_probs.sum()  # 更安全的归一化方式
 
         # 采样动作
+        if len(legal_placements) == 0 or len(legal_blocks) == 0:
+            return None, 0, 0
+
+        # 处理可能的数值问题
+        place_probs = np.nan_to_num(place_probs, nan=0.0, posinf=0.0, neginf=0.0)
+        block_probs = np.nan_to_num(block_probs, nan=0.0, posinf=0.0, neginf=0.0)
+
+        if place_probs.sum() <= 0:
+            place_probs = np.ones_like(place_probs) / place_probs.size
+        if block_probs.sum() <= 0:
+            block_probs = np.ones_like(block_probs) / block_probs.size
+
+        # 采样放置动作
         place_flat = place_probs.flatten()
         place_idx = np.random.choice(len(place_flat), p=place_flat)
         x = place_idx // 4 + 1
         o = place_idx % 4
 
         # 找到对应的y坐标
-        y = self.game.findLowestY(color, x, o, self.game.nextTypeForColor[color])
+        y = self.env.MAPHEIGHT
+        block = self.env.Tetris(self.env, self.env.current_type[color], color)
+        while y >= 1:
+            if block.set_pos(x, y, o).is_valid():
+                break
+            y -= 1
 
         # 选择方块类型
         block_type = np.random.choice(7, p=block_probs)
@@ -174,16 +179,16 @@ class PPOTetrisAgent:
         if len(self.buffer) < Config.BATCH_SIZE:
             return
 
-        # 计算GAE和回报
-        states, actions, rewards, next_states, dones, old_log_probs, values = zip(*self.buffer.sample(Config.BATCH_SIZE))
+        # 从缓冲区采样
+        samples = self.buffer.sample(Config.BATCH_SIZE)
+        states, actions, rewards, next_states, dones, old_log_probs, values = zip(*samples)
 
         # 转换为张量
         states = torch.FloatTensor(np.array(states))
-        actions = actions  # 保持字典形式
         old_log_probs = torch.FloatTensor(np.array(old_log_probs))
         values = torch.FloatTensor(np.array(values))
 
-        # 计算优势
+        # 计算GAE和回报
         returns = self.compute_returns(rewards, dones, values)
         advantages = returns - values
 
@@ -195,15 +200,27 @@ class PPOTetrisAgent:
             for idx in range(0, Config.BATCH_SIZE, Config.MINIBATCH_SIZE):
                 # 获取小批量
                 mb_states = states[idx:idx+Config.MINIBATCH_SIZE]
+
+                # 一次性计算所有输出的概率
+                output = self.policy(mb_states)
+
+                # 计算新概率 - 修改这部分
                 mb_actions = actions[idx:idx+Config.MINIBATCH_SIZE]
+                new_log_probs = []
+                for i, action in enumerate(mb_actions):
+                    # 为每个动作创建对应的输出切片
+                    single_output = {
+                        'placement': output['placement'][i:i+1],
+                        'block_select': output['block_select'][i:i+1],
+                        'value': output['value'][i:i+1]
+                    }
+                    new_log_probs.append(self.compute_log_prob(single_output, action))
+                new_log_probs = torch.stack(new_log_probs)
+
+                # 其余部分保持不变
                 mb_old_log_probs = old_log_probs[idx:idx+Config.MINIBATCH_SIZE]
                 mb_advantages = advantages[idx:idx+Config.MINIBATCH_SIZE]
                 mb_returns = returns[idx:idx+Config.MINIBATCH_SIZE]
-
-                # 计算新概率
-                output = self.policy(mb_states)
-                new_log_probs = torch.stack([self.compute_log_prob(output[i:i+1], a)
-                                             for i, a in enumerate(mb_actions)])
 
                 # 计算比率
                 ratios = torch.exp(new_log_probs - mb_old_log_probs)
@@ -217,8 +234,8 @@ class PPOTetrisAgent:
                 value_loss = (mb_returns - output['value'].squeeze()).pow(2).mean()
 
                 # 熵奖励
-                entropy = -(output['placement'] * torch.log(output['placement'])).mean() + \
-                          -(output['block_select'] * torch.log(output['block_select'])).mean()
+                entropy = -(output['placement'] * torch.log(output['placement'] + 1e-10)).mean() + \
+                          -(output['block_select'] * torch.log(output['block_select'] + 1e-10)).mean()
 
                 # 总损失
                 loss = policy_loss + 0.5 * value_loss - Config.ENTROPY_COEF * entropy
@@ -240,20 +257,24 @@ class PPOTetrisAgent:
     def train(self):
         """训练循环"""
         for episode in range(Config.MAX_EPISODES):
-            state = self.get_state(0)  # 假设当前玩家是0
+            self.env.reset()
+            state = self.env.get_state(0)  # 玩家0
             total_reward = 0
             done = False
 
             while not done:
                 # 选择动作
                 action, value, log_prob = self.select_action(state, 0)
-
-                # 执行动作
-                reward, done = self.game.step(0, action['x'], action['y'], action['o'], action['block'])
-                next_state = self.get_state(0)
+                if action is None:  # 没有合法动作
+                    reward = -10
+                    done = True
+                else:
+                    # 执行动作
+                    reward, done = self.env.step(0, (action['block'], action['x'], action['y'], action['o']))
+                    next_state = self.env.get_state(0)
 
                 # 存储经验
-                self.buffer.add(state, action, reward, next_state, done, log_prob.item(), value)
+                self.buffer.add(state, action, reward, next_state if not done else None, done, log_prob, value)
 
                 # 更新状态
                 state = next_state
@@ -264,10 +285,12 @@ class PPOTetrisAgent:
                     self.update()
 
             # 保存模型
-            if episode % Config.SAVE_INTERVAL == 0:
+            if episode % Config.SAVE_INTERVAL == 0 and episode != 0:
                 torch.save(self.policy.state_dict(), f'tetris_ppo_{episode}.pth')
-                print(f"Episode {episode}, Reward: {total_reward}")
+
+            print(f"Episode {episode}, Reward: {total_reward}")
 
 if __name__ == "__main__":
+    print("训练开始")
     agent = PPOTetrisAgent()
     agent.train()

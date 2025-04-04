@@ -3,7 +3,6 @@ import random
 from copy import deepcopy
 import torch
 import numpy as np
-from train import TetrisPolicyNetwork
 
 # 游戏常量定义
 MAPWIDTH = 10      # 地图宽度
@@ -351,72 +350,6 @@ def get_state_representation(color, nextTypeForColor):
 
     return state
 
-class TetrisAI:
-    def __init__(self, model_path, color):
-        self.model = TetrisPolicyNetwork()  # 使用与训练相同的网络结构
-        self.model.load_state_dict(torch.load(model_path))
-        self.model.eval()
-        self.color = color
-        self.game = None
-
-    def get_state(self):
-        """获取当前游戏状态"""
-        grid = self.game.gridInfo[self.color][1:21, 1:11].flatten()
-        current_block = np.zeros(7)
-        current_block[self.game.nextTypeForColor[self.color]] = 1
-        enemy_stats = np.array(self.game.typeCountForColor[1 - self.color])
-        combo = np.array([self.game.elimCombo[self.color]])
-        height = np.array([self.game.maxHeight[self.color]])
-        return np.concatenate([grid, current_block, enemy_stats, combo, height])
-
-    def get_legal_actions(self):
-        """获取合法动作"""
-        legal_placements = []
-        block_type = self.game.nextTypeForColor[self.color]
-
-        for x in range(1, 11):
-            for o in range(4):
-                y = self.game.findLowestY(self.color, x, o, block_type)
-                if y != -1 and self.game.checkValidPlacement(self.color, x, y, o, block_type):
-                    legal_placements.append((x, o))
-
-        enemy_counts = self.game.typeCountForColor[1 - self.color]
-        min_count = min(enemy_counts)
-        legal_blocks = [t for t in range(7) if enemy_counts[t] <= min_count + 2]
-
-        return legal_placements, legal_blocks
-
-    def make_decision(self):
-        """做出决策并返回游戏需要的格式"""
-        if not self.game:
-            raise ValueError("Game not attached")
-
-        state = self.get_state()
-        legal_placements, legal_blocks = self.get_legal_actions()
-
-        with torch.no_grad():
-            output = self.model(torch.FloatTensor(state).unsqueeze(0))
-
-        # 动作屏蔽
-        place_probs = np.zeros((10, 4))
-        for x, o in legal_placements:
-            place_probs[x-1, o] = output['placement'][0, x-1, o].item()
-        place_probs /= place_probs.sum()
-
-        block_probs = np.zeros(7)
-        for t in legal_blocks:
-            block_probs[t] = output['block_select'][0, t].item()
-        block_probs /= block_probs.sum()
-
-        # 选择概率最高的动作
-        x, o = np.unravel_index(np.argmax(place_probs), place_probs.shape)
-        x += 1
-        block_type = np.argmax(block_probs)
-
-        y = self.game.findLowestY(self.color, x, o, self.game.nextTypeForColor[self.color])
-
-        return block_type, x, y, o
-
 def printCurrentGrid(player):
     for i in range(MAPHEIGHT, 0, -1):
         print(i, gridInfo[player][i])
@@ -474,12 +407,10 @@ def main():
     # 决策
 
     # 决策选择落点
-    blockForEnemy, finalX, finalY, finalO = 1
+    blockForEnemy, finalX, finalY, finalO = 1 # 决策，稍后实现
 
     # 输出决策(方块类型, x, y, 旋转状态)
     print(f"{blockForEnemy} {finalX} {finalY} {finalO}")
-
-
 
 if __name__ == "__main__":
     main()
