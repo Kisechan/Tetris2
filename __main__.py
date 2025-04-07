@@ -69,71 +69,77 @@ rotateBlank = [
     [[0,0], [0,0], [0,0], [0,0]]
 ]
 
-attr = [0.0031716211351593346,-1.0,-0.975700323228232,-0.7890873645716108,-0.9075430752097631,-0.909170572114474]
-numHolesWeight = attr[0]      # 空洞数的权重
-pileHeightWeight = attr[1]    # 平均堆高的权重
-wellHeightWeight = attr[2]    # 井深总和的权重
-heightDiffWeight = attr[3]    # 行高差异的权重
-linesClearWeight = attr[4]    # 消除行数的权重
-edgeExposureWeight = attr[5]  # 边缘暴露的权重
+attr = [-0.13, -0.80, -0.18, -0.04, 0.27]
+occupiedWeight = attr[0]
+numHolesWeight = attr[1]
+pileHeightWeight = attr[2]
+wellHeightWeight = attr[3]
+linesClearWeight = attr[4]
 
 def calculateParameters(color, simulatedGrid):
     """计算当前局面的各项参数"""
     params = {
-        'numHoles': 0,          # 空洞数量
-        'pileHeight': 0,        # 平均堆高
-        'wellHeight': 0,        # 井深总和
-        'heightDiff': 0,        # 行高差异
-        'linesClear': 0,        # 消除行数
-        'edgeExposure': 0,      # 边缘暴露
+        'occupied': 0,
+        'numHoles': 0,
+        'pileHeight': 0,
+        'wellHeight': 0,
+        'linesClear': 0,
     }
 
-    # 计算各列高度和最大高度
-    columnHeights = [0] * (MAPWIDTH + 2)
-    for x in range(1, MAPWIDTH+1):
-        for y in range(1, MAPHEIGHT+1):
-            if simulatedGrid[y][x]:
-                columnHeights[x] = MAPHEIGHT - y + 1
-                break
+    for y in range(1, MAPHEIGHT + 1):
+        for x in range(1, MAPWIDTH + 1):
+            if simulatedGrid[y][x] != 0:
+                params['occupied'] += 1
 
-    # 空洞检测
-    for x in range(1, MAPWIDTH+1):
-        foundBlock = False
-        for y in range(MAPHEIGHT, 0, -1):
-            if simulatedGrid[y][x]:
-                foundBlock = True
-            elif foundBlock:
+    for x in range(1, MAPWIDTH + 1):
+        y = MAPHEIGHT
+        while y > 0 and simulatedGrid[y][x] == 0:
+            y -= 1
+        y -= 1
+        while y > 0:
+            if simulatedGrid[y][x] != 0:
                 params['numHoles'] += 1
+            y -= 1
 
-    # 堆高参数
-    params['pileHeight'] = max(columnHeights)
+    for y in range(MAPHEIGHT, 0, -1):
+        found = False
+        for x in range(1, MAPWIDTH + 1):
+            if simulatedGrid[y][x] != 0:
+                params['pileHeight'] = y
+                found = True
+                break
+        if found:
+            break
 
-    # 井深计算
-    for x in range(2, MAPWIDTH):
-        left = columnHeights[x-1]
-        right = columnHeights[x+1]
-        current = columnHeights[x]
-        if current < left and current < right:
-            params['wellHeight'] += min(left, right) - current
+    pre = -1
+    for x in range(MAPWIDTH, 0, -1):
+        ht = 0
+        for y in range(MAPHEIGHT, 0, -1):
+            if simulatedGrid[y][x] != 0:
+                ht = y
+                break
+        if pre != -1:
+            params['wellHeight'] += abs(ht - pre)
+        pre = ht
 
-    # 行高差异
-    params['heightDiff'] = sum(abs(columnHeights[x] - columnHeights[x+1])
-                                for x in range(1, MAPWIDTH))
-
-    # 边缘暴露（两侧边缘列的高度）
-    params['edgeExposure'] = columnHeights[1] + columnHeights[MAPWIDTH]
+    for y in range(1, MAPHEIGHT + 1):
+        ct = 0
+        for x in range(1, MAPWIDTH + 1):
+            if simulatedGrid[y][x] != 0:
+                ct += 1
+        if ct == MAPWIDTH:
+            params['linesClear'] += 1
 
     return params
 
 def evaluatePosition(params):
     """算分"""
     score = 0
+    score += params['occupied'] * occupiedWeight
+    score += params['numHoles'] * numHolesWeight
+    score += params['pileHeight'] * pileHeightWeight
+    score += params['wellHeight'] * wellHeightWeight
     score += params['linesClear'] * linesClearWeight
-    score -= params['numHoles'] * numHolesWeight
-    score -= params['pileHeight'] * pileHeightWeight
-    score -= params['wellHeight'] * wellHeightWeight
-    score -= params['heightDiff'] * heightDiffWeight
-    score -= params['edgeExposure'] * edgeExposureWeight
     return score
 
 class Tetris:
