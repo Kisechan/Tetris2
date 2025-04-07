@@ -97,7 +97,7 @@ def calculateParameters(color, simulatedGrid):
             y -= 1
         y -= 1
         while y > 0:
-            if simulatedGrid[y][x] != 0:
+            if simulatedGrid[y][x] == 0:
                 params['numHoles'] += 1
             y -= 1
 
@@ -129,7 +129,7 @@ def calculateParameters(color, simulatedGrid):
                 ct += 1
         if ct == MAPWIDTH:
             params['linesClear'] += 1
-
+    # print(params)
     return params
 
 def evaluatePosition(params):
@@ -422,6 +422,7 @@ def findBestSpot(color, blockType):
                     simulated = simulatePlace(color, x, y, o, blockType)
                     params = calculateParameters(color, simulated)
                     score = evaluatePosition(params)
+                    # print(x, y, o, score)
                     if score > bestScore:
                         bestScore = score
                         bestX, bestY, bestO = x, y, o
