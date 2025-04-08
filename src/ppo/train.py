@@ -4,294 +4,253 @@ import torch.optim as optim
 import numpy as np
 from collections import deque
 import random
-from tetris2_env import Tetris2Env
+from torch.distributions import Categorical
+import torch.nn.functional as F
+from tetris2_env import Tetris2_env
 
-# 超参数配置
-class Config:
-    GAMMA = 0.99
-    LAMBDA = 0.95
-    LR = 3e-4
-    CLIP_EPSILON = 0.2
-    ENTROPY_COEF = 0.01
-    BATCH_SIZE = 64
-    MINIBATCH_SIZE = 16
-    PPO_EPOCHS = 4
-    MAX_EPISODES = 10000
-    SAVE_INTERVAL = 100
-    HIDDEN_SIZE = 256
-    STATE_DIM = 20*10 + 7 + 7 + 1 + 1  # 网格(200) + 当前方块(7) + 对方统计(7) + 连消(1) + 高度(1)
+class PPONetwork(nn.Module):
+    def __init__(self, input_shape, num_actions):
+        super(PPONetwork, self).__init__()
 
-# PPO策略网络
-class TetrisPolicyNetwork(nn.Module):
-    def __init__(self):
-        super().__init__()
-        # 共享特征提取
-        self.shared = nn.Sequential(
-            nn.Linear(Config.STATE_DIM, Config.HIDDEN_SIZE),
-            nn.ReLU()
-        )
+        # 棋盘编码器 (处理两个棋盘)
+        self.conv1 = nn.Conv2d(1, 32, kernel_size=3, stride=1, padding=1)
+        self.conv2 = nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1)
+        self.conv3 = nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=1)
 
-        # 放置动作头 (x位置和旋转)
-        self.placement_head = nn.Sequential(
-            nn.Linear(Config.HIDDEN_SIZE, Config.HIDDEN_SIZE),
-            nn.ReLU(),
-            nn.Linear(Config.HIDDEN_SIZE, 10*4)  # 10列 × 4种旋转
-        )
+        # 计算卷积后的尺寸
+        def conv2d_size_out(size, kernel_size=3, stride=1, padding=1):
+            return (size + 2*padding - kernel_size) // stride + 1
 
-        # 方块选择头
-        self.block_head = nn.Sequential(
-            nn.Linear(Config.HIDDEN_SIZE, Config.HIDDEN_SIZE),
-            nn.ReLU(),
-            nn.Linear(Config.HIDDEN_SIZE, 7)  # 7种方块类型
-        )
+        convw = conv2d_size_out(conv2d_size_out(conv2d_size_out(input_shape[2])))
+        convh = conv2d_size_out(conv2d_size_out(conv2d_size_out(input_shape[1])))
+        linear_input_size = convw * convh * 64
 
-        # 价值函数头
-        self.value_head = nn.Linear(Config.HIDDEN_SIZE, 1)
+        # 方块类型和统计信息编码
+        self.piece_embedding = nn.Embedding(7, 16)  # 7种方块类型
+        self.stat_fc = nn.Linear(14 + 2, 64)  # 14个计数+2个高度
 
-    def forward(self, x):
-        features = self.shared(x)
+        # 合并所有特征
+        self.combine_fc = nn.Linear(linear_input_size * 2 + 16 + 64, 512)
 
-        # 获取各动作的概率分布
-        place_logits = self.placement_head(features).view(-1, 10, 4)
-        block_logits = self.block_head(features)
+        # 输出头
+        self.placement_head = nn.Linear(512, input_shape[1] * input_shape[2] * 4)  # 每个位置和旋转的概率
+        self.next_block_head = nn.Linear(512, 7)  # 选择下一个方块
+        self.value_head = nn.Linear(512, 1)  # 状态价值
 
-        return {
-            'placement': torch.softmax(place_logits, dim=-1),
-            'block_select': torch.softmax(block_logits, dim=-1),
-            'value': self.value_head(features)
-        }
+    def forward(self, state):
+        # 处理当前棋盘
+        current_grid = state["current_grid"].unsqueeze(1).float()  # [batch, 1, H, W]
+        c1 = torch.relu(self.conv1(current_grid))
+        c2 = torch.relu(self.conv2(c1))
+        c3 = torch.relu(self.conv3(c2))
+        current_features = c3.view(c3.size(0), -1)
 
-# 经验回放缓冲区
-class ReplayBuffer:
-    def __init__(self, capacity):
-        self.buffer = deque(maxlen=capacity)
+        # 处理对手棋盘
+        enemy_grid = state["enemy_grid"].unsqueeze(1).float()
+        e1 = torch.relu(self.conv1(enemy_grid))
+        e2 = torch.relu(self.conv2(e1))
+        e3 = torch.relu(self.conv3(e2))
+        enemy_features = e3.view(e3.size(0), -1)
 
-    def add(self, state, action, reward, next_state, done, old_log_prob, value):
-        self.buffer.append((state, action, reward, next_state, done, old_log_prob, value))
+        # 处理当前方块
+        piece_emb = self.piece_embedding(state["current_piece"].long())
 
-    def sample(self, batch_size):
-        return random.sample(self.buffer, min(batch_size, len(self.buffer)))
+        # 处理统计信息
+        stats = torch.cat([
+            state["piece_counts"].float(),
+            state["enemy_piece_counts"].float(),
+            state["max_height"].unsqueeze(1).float(),
+            state["enemy_max_height"].unsqueeze(1).float()
+        ], dim=1)
+        stats_features = torch.relu(self.stat_fc(stats))
 
-    def __len__(self):
-        return len(self.buffer)
+        # 合并所有特征
+        combined = torch.cat([current_features, enemy_features, piece_emb, stats_features], dim=1)
+        combined = torch.relu(self.combine_fc(combined))
 
-# PPO智能体
-class PPOTetrisAgent:
-    def __init__(self):
-        self.policy = TetrisPolicyNetwork()
-        self.optimizer = optim.Adam(self.policy.parameters(), lr=Config.LR)
-        self.buffer = ReplayBuffer(10000)
-        self.env = Tetris2Env()
+        # 计算输出
+        placement_logits = self.placement_head(combined)
+        next_block_logits = self.next_block_head(combined)
+        value = self.value_head(combined)
 
-    def get_legal_actions(self, color):
-        """获取当前所有合法动作"""
-        legal_placements = []
-        block_type = self.env.current_type[color]
+        return placement_logits, next_block_logits, value
 
-        # 检查所有可能的放置位置
-        for x in range(1, 11):
-            for o in range(4):
-                # 找到能落下的最低y位置
-                for y in range(self.env.MAPHEIGHT, 0, -1):
-                    block = self.env.Tetris(self.env, block_type, color)
-                    if (block.set_pos(x, y, o).is_valid() and
-                            self.env.check_direct_drop(color, block_type, x, y, o)):
-                        legal_placements.append((x, o))
-                        break
+class PPOAgent:
+    def __init__(self, input_shape, num_actions, lr=3e-4, gamma=0.99, clip_epsilon=0.2, beta=0.01):
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.policy = PPONetwork(input_shape, num_actions).to(self.device)
+        self.optimizer = optim.Adam(self.policy.parameters(), lr=lr)
+        self.gamma = gamma
+        self.clip_epsilon = clip_epsilon
+        self.beta = beta
+        self.memory = deque(maxlen=10000)
 
-        # 检查合法的方块类型选择
-        enemy_counts = self.env.type_count[1 - color]
-        min_count = min(enemy_counts)
-        legal_blocks = [t for t in range(7) if enemy_counts[t] <= min_count + 2]
-
-        return legal_placements, legal_blocks
-
-    def select_action(self, state, color):
-        """根据策略选择动作，应用动作屏蔽"""
-        legal_placements, legal_blocks = self.get_legal_actions(color)
-
+    def get_action(self, state):
+        state = self._preprocess_state(state)
         with torch.no_grad():
-            output = self.policy(torch.FloatTensor(state).unsqueeze(0))  # 确保有batch维度
+            placement_logits, next_block_logits, value = self.policy(state)
 
-        # 应用动作屏蔽
-        # 1. 处理放置动作
-        place_probs = np.zeros((10, 4))
-        for x, o in legal_placements:
-            place_probs[x-1, o] = output['placement'][0, x-1, o].item()
-        if place_probs.sum() > 0:
-            place_probs = place_probs / place_probs.sum()  # 更安全的归一化方式
+            # 处理放置动作
+            placement_probs = torch.softmax(placement_logits.view(-1), dim=0)
+            placement_dist = Categorical(placement_probs)
+            placement_action_flat = placement_dist.sample()
 
-        # 2. 处理方块选择 - 修复索引
-        block_probs = np.zeros(7)
-        for t in legal_blocks:
-            block_probs[t] = output['block_select'][0][t].item()  # 正确的索引方式
-        if block_probs.sum() > 0:
-            block_probs = block_probs / block_probs.sum()  # 更安全的归一化方式
+            # 将扁平化动作转换为(x,y,rotation)
+            width, height = state["current_grid"].shape[-2:]
+            rotation_size = 4
+            placement_action = (
+                placement_action_flat % width + 1,
+                (placement_action_flat // width) % height + 1,
+                (placement_action_flat // (width * height)) % rotation_size
+            )
 
-        # 采样动作
-        if len(legal_placements) == 0 or len(legal_blocks) == 0:
-            return None, 0, 0
+            # 处理下一个方块选择
+            next_block_probs = torch.softmax(next_block_logits, dim=-1)
+            next_block_dist = Categorical(next_block_probs)
+            next_block_action = next_block_dist.sample()
 
-        # 处理可能的数值问题
-        place_probs = np.nan_to_num(place_probs, nan=0.0, posinf=0.0, neginf=0.0)
-        block_probs = np.nan_to_num(block_probs, nan=0.0, posinf=0.0, neginf=0.0)
+            # 计算动作概率
+            action_prob = placement_dist.log_prob(placement_action_flat).exp() * \
+                          next_block_dist.log_prob(next_block_action).exp()
 
-        if place_probs.sum() <= 0:
-            place_probs = np.ones_like(place_probs) / place_probs.size
-        if block_probs.sum() <= 0:
-            block_probs = np.ones_like(block_probs) / block_probs.size
+            return (placement_action, next_block_action.item()), action_prob.item(), value.item()
 
-        # 采样放置动作
-        place_flat = place_probs.flatten()
-        place_idx = np.random.choice(len(place_flat), p=place_flat)
-        x = place_idx // 4 + 1
-        o = place_idx % 4
+    def store_transition(self, state, action, prob, value, reward, done):
+        self.memory.append((state, action, prob, value, reward, done))
 
-        # 找到对应的y坐标
-        y = self.env.MAPHEIGHT
-        block = self.env.Tetris(self.env, self.env.current_type[color], color)
-        while y >= 1:
-            if block.set_pos(x, y, o).is_valid():
-                break
-            y -= 1
-
-        # 选择方块类型
-        block_type = np.random.choice(7, p=block_probs)
-
-        # 计算动作的对数概率
-        action = {'x': x, 'y': y, 'o': o, 'block': block_type}
-        log_prob = self.compute_log_prob(output, action)
-
-        return action, output['value'].item(), log_prob
-
-    def compute_log_prob(self, output, action):
-        """计算动作的对数概率"""
-        # 放置部分
-        place_log_prob = torch.log(output['placement'][0, action['x']-1, action['o']])
-
-        # 方块选择部分
-        block_log_prob = torch.log(output['block_select'][0, action['block']])
-
-        return place_log_prob + block_log_prob
-
-    def update(self):
-        """PPO算法更新"""
-        if len(self.buffer) < Config.BATCH_SIZE:
+    def update(self, batch_size):
+        if len(self.memory) < batch_size:
             return
 
-        # 从缓冲区采样
-        samples = self.buffer.sample(Config.BATCH_SIZE)
-        states, actions, rewards, next_states, dones, old_log_probs, values = zip(*samples)
+        # 从记忆中采样
+        samples = random.sample(self.memory, batch_size)
+        states, actions, old_probs, old_values, rewards, dones = zip(*samples)
 
-        # 转换为张量
-        states = torch.FloatTensor(np.array(states))
-        old_log_probs = torch.FloatTensor(np.array(old_log_probs))
-        values = torch.FloatTensor(np.array(values))
+        # 预处理状态
+        states = [self._preprocess_state(s) for s in states]
 
-        # 计算GAE和回报
-        returns = self.compute_returns(rewards, dones, values)
-        advantages = returns - values
+        # 计算折扣回报和优势
+        returns = []
+        advantages = []
+        R = 0
+        for i in reversed(range(len(rewards))):
+            R = rewards[i] + self.gamma * R * (1 - dones[i])
+            returns.insert(0, R)
+            advantages.insert(0, R - old_values[i])
 
-        # 归一化优势
+        # 标准化优势
+        advantages = torch.tensor(advantages, device=self.device).float()
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
-        # PPO更新
-        for _ in range(Config.PPO_EPOCHS):
-            for idx in range(0, Config.BATCH_SIZE, Config.MINIBATCH_SIZE):
-                # 获取小批量
-                mb_states = states[idx:idx+Config.MINIBATCH_SIZE]
+        # 转换数据为张量
+        returns = torch.tensor(returns, device=self.device).float()
+        old_probs = torch.tensor(old_probs, device=self.device).float()
+        old_values = torch.tensor(old_values, device=self.device).float()
 
-                # 一次性计算所有输出的概率
-                output = self.policy(mb_states)
+        # 计算新概率和值
+        placement_actions = []
+        next_block_actions = []
+        for action in actions:
+            placement, next_block = action
+            width = states[0]["current_grid"].shape[-1]
+            height = states[0]["current_grid"].shape[-2]
+            placement_flat = (placement[1]-1)*width*4 + (placement[0]-1)*4 + placement[2]
+            placement_actions.append(placement_flat)
+            next_block_actions.append(next_block)
 
-                # 计算新概率 - 修改这部分
-                mb_actions = actions[idx:idx+Config.MINIBATCH_SIZE]
-                new_log_probs = []
-                for i, action in enumerate(mb_actions):
-                    # 为每个动作创建对应的输出切片
-                    single_output = {
-                        'placement': output['placement'][i:i+1],
-                        'block_select': output['block_select'][i:i+1],
-                        'value': output['value'][i:i+1]
-                    }
-                    new_log_probs.append(self.compute_log_prob(single_output, action))
-                new_log_probs = torch.stack(new_log_probs)
+        placement_actions = torch.tensor(placement_actions, device=self.device).long()
+        next_block_actions = torch.tensor(next_block_actions, device=self.device).long()
 
-                # 其余部分保持不变
-                mb_old_log_probs = old_log_probs[idx:idx+Config.MINIBATCH_SIZE]
-                mb_advantages = advantages[idx:idx+Config.MINIBATCH_SIZE]
-                mb_returns = returns[idx:idx+Config.MINIBATCH_SIZE]
+        placement_logits, next_block_logits, values = self.policy(states)
 
-                # 计算比率
-                ratios = torch.exp(new_log_probs - mb_old_log_probs)
+        # 计算新概率
+        placement_probs = torch.softmax(placement_logits.view(batch_size, -1), dim=-1)
+        placement_dist = Categorical(placement_probs)
+        placement_log_probs = placement_dist.log_prob(placement_actions)
 
-                # 计算损失
-                surr1 = ratios * mb_advantages
-                surr2 = torch.clamp(ratios, 1-Config.CLIP_EPSILON, 1+Config.CLIP_EPSILON) * mb_advantages
-                policy_loss = -torch.min(surr1, surr2).mean()
+        next_block_probs = torch.softmax(next_block_logits, dim=-1)
+        next_block_dist = Categorical(next_block_probs)
+        next_block_log_probs = next_block_dist.log_prob(next_block_actions)
 
-                # 价值函数损失
-                value_loss = (mb_returns - output['value'].squeeze()).pow(2).mean()
+        new_probs = (placement_log_probs + next_block_log_probs).exp()
 
-                # 熵奖励
-                entropy = -(output['placement'] * torch.log(output['placement'] + 1e-10)).mean() + \
-                          -(output['block_select'] * torch.log(output['block_select'] + 1e-10)).mean()
+        # PPO比率
+        ratios = new_probs / old_probs
 
-                # 总损失
-                loss = policy_loss + 0.5 * value_loss - Config.ENTROPY_COEF * entropy
+        # PPO目标函数
+        surr1 = ratios * advantages
+        surr2 = torch.clamp(ratios, 1.0 - self.clip_epsilon, 1.0 + self.clip_epsilon) * advantages
+        policy_loss = -torch.min(surr1, surr2).mean()
 
-                # 梯度更新
-                self.optimizer.zero_grad()
-                loss.backward()
-                self.optimizer.step()
+        # 价值损失
+        value_loss = F.mse_loss(values.squeeze(), returns)
 
-    def compute_returns(self, rewards, dones, values):
-        """计算GAE回报"""
-        returns = []
-        R = 0
-        for r, done, v in zip(reversed(rewards), reversed(dones), reversed(values)):
-            R = r + Config.GAMMA * R * (1 - done)
-            returns.insert(0, R)
-        return torch.FloatTensor(returns)
+        # 熵奖励
+        placement_entropy = placement_dist.entropy().mean()
+        next_block_entropy = next_block_dist.entropy().mean()
+        entropy = placement_entropy + next_block_entropy
 
-    def train(self):
-        """训练循环"""
-        for episode in range(Config.MAX_EPISODES):
-            self.env.reset()
-            state = self.env.get_state(0)  # 玩家0
-            total_reward = 0
-            done = False
+        # 总损失
+        loss = policy_loss + 0.5 * value_loss - self.beta * entropy
 
-            while not done:
-                # 选择动作
-                action, value, log_prob = self.select_action(state, 0)
-                if action is None:  # 没有合法动作
-                    print("没有合法动作")
-                    reward = -10
-                    done = True
-                else:
-                    # 执行动作
-                    reward, done = self.env.step(0, (action['block'], action['x'], action['y'], action['o']))
-                    next_state = self.env.get_state(0)
+        # 更新模型
+        self.optimizer.zero_grad()
+        loss.backward()
+        self.optimizer.step()
 
-                # 存储经验
-                self.buffer.add(state, action, reward, next_state if not done else None, done, log_prob, value)
+        return loss.item()
 
-                # 更新状态
-                state = next_state
-                total_reward += reward
+    def _preprocess_state(self, state):
+        """将状态转换为适合神经网络的格式"""
+        processed = {}
+        for k, v in state.items():
+            if isinstance(v, np.ndarray):
+                processed[k] = torch.FloatTensor(v).unsqueeze(0).to(self.device)
+            else:
+                processed[k] = torch.tensor([v], device=self.device)
+        return processed
 
-                # 更新策略
-                if len(self.buffer) >= Config.BATCH_SIZE:
-                    self.update()
+def train():
+    env = Tetris2_env()
+    input_shape = (1, env.MAPHEIGHT, env.MAPWIDTH)
+    agent = PPOAgent(input_shape, num_actions=7)
 
-            # 保存模型
-            if episode % Config.SAVE_INTERVAL == 0 and episode != 0:
-                torch.save(self.policy.state_dict(), f'tetris_ppo_{episode}.pth')
+    batch_size = 128
+    episodes = 1000
+    max_steps = 200
 
-            print(f"Episode {episode + 1}, Reward: {total_reward}")
+    for episode in range(episodes):
+        print(f"episode = {episode}, training...")
+        state = env.reset()
+        episode_reward = 0
+        done = False
+        step_count = 0
+
+        while not done and step_count < max_steps:
+            # 获取动作
+            action, prob, value = agent.get_action(state)
+
+            # 执行动作
+            next_state, reward, done, info = env.step(action)
+
+            # 存储转换
+            agent.store_transition(state, action, prob, value, reward, done)
+
+            state = next_state
+            episode_reward += reward
+            step_count += 1
+
+            # 定期更新模型
+            if len(agent.memory) >= batch_size:
+                loss = agent.update(batch_size)
+                print(f"Episode {episode}, Step {step_count}, Loss: {loss:.4f}")
+
+        print(f"Episode {episode}, Reward: {episode_reward}, Steps: {step_count}")
+
+        # 定期保存模型
+        if (episode + 1) % 100 == 0:
+            torch.save(agent.policy.state_dict(), f"tetris_ppo_{episode}.pth")
 
 if __name__ == "__main__":
     print("训练开始")
-    agent = PPOTetrisAgent()
-    agent.train()
+    train()
