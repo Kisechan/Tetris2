@@ -188,7 +188,7 @@ class Tetris2_env:
         self.elimTotal[color] += self.elimBonus[count - hasBonus] if count - hasBonus < 5 else 7
 
         if count == 0:
-            return
+            return 0
 
         # 重新构建地图(消除行后下落)
         writeRow = self.MAPHEIGHT
@@ -209,6 +209,8 @@ class Tetris2_env:
 
         # 更新最大高度（当前最高方块位置）
         self.maxHeight[color] = self.MAPHEIGHT - writeRow
+
+        return len(fullRows)
 
     def transfer(self):
         """处理双方的行转移"""
@@ -355,7 +357,7 @@ class Tetris2_env:
 
         # self.render()
         # 3. 消除行并处理转移行
-        self.eliminate(self.currBotColor)
+        reward = self.eliminate(self.currBotColor) * 1.0
         result = self.transfer()
 
         # 4. 检查游戏是否结束
@@ -382,7 +384,7 @@ class Tetris2_env:
             return self._get_state(), reward, True, {"winner": winner}
 
         # 8. 计算中间奖励
-        reward = self._calculate_intermediate_reward()
+        reward += self._calculate_intermediate_reward()
 
         return self._get_state(), reward, False, {}
 
@@ -412,10 +414,11 @@ class Tetris2_env:
 
     def _calculate_intermediate_reward(self):
         """计算中间奖励"""
-        reward = 0.0
+        # 存活奖励
+        reward = 0.05
 
         # 1. 消除行奖励
-        reward += self.elimTotal[self.currBotColor] * 1.0
+        # reward += self.elimTotal[self.currBotColor] * 1.0
 
         # 2. 高度惩罚 (鼓励保持低高度)
         reward -= self.maxHeight[self.currBotColor] * 0.01
