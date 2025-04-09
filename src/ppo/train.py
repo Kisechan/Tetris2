@@ -6,7 +6,8 @@ from collections import deque
 import random
 from torch.distributions import Categorical
 import torch.nn.functional as F
-from tetris2_env import Tetris2_env
+from tetris2_env import Tetris2_env, decode_action
+import matplotlib.pyplot as plt
 
 class PPONetwork(nn.Module):
     def __init__(self, input_shape, num_actions):
@@ -85,27 +86,57 @@ class PPOAgent:
         self.beta = beta
         self.memory = deque(maxlen=10000)
 
-    def get_action(self, state):
+    def get_action(self, state, env):
         state = self._preprocess_state(state)
+
+        width = state["current_grid"].shape[-1]
+        height = state["current_grid"].shape[-2]
+        rotation_size = 4
+        total_actions = width * height * rotation_size
+
+        valid_actions = env.get_valid_actions()  # 是一维索引列表
+
         with torch.no_grad():
             placement_logits, next_block_logits, value = self.policy(state)
+            placement_logits = placement_logits.view(-1)
 
-            # 处理放置动作
-            placement_probs = torch.softmax(placement_logits.view(-1), dim=0)
+            placement_mask = torch.full_like(placement_logits, float('-inf'))
+            if valid_actions:
+                for idx in valid_actions:
+                    placement_mask[idx] = placement_logits[idx]
+            else:
+                print("没有合法的放置动作，将随机选择")
+                placement_mask = placement_logits
+
+            placement_probs = torch.softmax(placement_mask, dim=0)
             placement_dist = Categorical(placement_probs)
             placement_action_flat = placement_dist.sample()
+            x, y, o = decode_action(placement_action_flat.item(), width)
+            placement_action = (x, y, o)
 
-            # 将扁平化动作转换为(x,y,rotation)
-            width, height = state["current_grid"].shape[-2:]
-            rotation_size = 4
-            placement_action = (
-                placement_action_flat % width + 1,
-                (placement_action_flat // width) % height + 1,
-                (placement_action_flat // (width * height)) % rotation_size
-            )
+            legal_next_blocks = []
+            piece_count = env.typeCountForColor
+            opponent_color = 1 - env.currBotColor
 
-            # 处理下一个方块选择
-            next_block_probs = torch.softmax(next_block_logits, dim=-1)
+            for next_block in range(7):
+                # 假设选择了该方块，更新对方的方块数量
+                temp_piece_count = piece_count[opponent_color][:]
+                temp_piece_count[next_block] += 1
+
+                # 检查对方方块数量的极差是否超过2
+                if max(temp_piece_count) - min(temp_piece_count) <= 2:
+                    legal_next_blocks.append(next_block)
+
+            next_block_logits = next_block_logits.view(-1)
+            next_block_mask = torch.full_like(next_block_logits, float('-inf'))
+            if legal_next_blocks:
+                for idx in legal_next_blocks:
+                    next_block_mask[idx] = next_block_logits[idx]
+            else:
+                print("无合法选择方块动作，将随机选择")
+                next_block_mask = next_block_logits
+
+            next_block_probs = torch.softmax(next_block_mask, dim=-1)
             next_block_dist = Categorical(next_block_probs)
             next_block_action = next_block_dist.sample()
 
@@ -115,6 +146,7 @@ class PPOAgent:
 
             return (placement_action, next_block_action.item()), action_prob.item(), value.item()
 
+
     def store_transition(self, state, action, prob, value, reward, done):
         self.memory.append((state, action, prob, value, reward, done))
 
@@ -122,14 +154,14 @@ class PPOAgent:
         if len(self.memory) < batch_size:
             return
 
-        # 从记忆中采样
         samples = random.sample(self.memory, batch_size)
         states, actions, old_probs, old_values, rewards, dones = zip(*samples)
 
-        # 预处理状态
+        # 预处理所有状态
         states = [self._preprocess_state(s) for s in states]
+        batched_states = self._batch_states(states)
 
-        # 计算折扣回报和优势
+        # 折扣回报和优势
         returns = []
         advantages = []
         R = 0
@@ -138,22 +170,20 @@ class PPOAgent:
             returns.insert(0, R)
             advantages.insert(0, R - old_values[i])
 
-        # 标准化优势
         advantages = torch.tensor(advantages, device=self.device).float()
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-
-        # 转换数据为张量
         returns = torch.tensor(returns, device=self.device).float()
         old_probs = torch.tensor(old_probs, device=self.device).float()
         old_values = torch.tensor(old_values, device=self.device).float()
 
-        # 计算新概率和值
+        # 获取动作张量
+        width = batched_states["current_grid"].shape[-1]
+        height = batched_states["current_grid"].shape[-2]
+
         placement_actions = []
         next_block_actions = []
         for action in actions:
             placement, next_block = action
-            width = states[0]["current_grid"].shape[-1]
-            height = states[0]["current_grid"].shape[-2]
             placement_flat = (placement[1]-1)*width*4 + (placement[0]-1)*4 + placement[2]
             placement_actions.append(placement_flat)
             next_block_actions.append(next_block)
@@ -161,9 +191,9 @@ class PPOAgent:
         placement_actions = torch.tensor(placement_actions, device=self.device).long()
         next_block_actions = torch.tensor(next_block_actions, device=self.device).long()
 
-        placement_logits, next_block_logits, values = self.policy(states)
+        # 预测
+        placement_logits, next_block_logits, values = self.policy(batched_states)
 
-        # 计算新概率
         placement_probs = torch.softmax(placement_logits.view(batch_size, -1), dim=-1)
         placement_dist = Categorical(placement_probs)
         placement_log_probs = placement_dist.log_prob(placement_actions)
@@ -173,27 +203,18 @@ class PPOAgent:
         next_block_log_probs = next_block_dist.log_prob(next_block_actions)
 
         new_probs = (placement_log_probs + next_block_log_probs).exp()
-
-        # PPO比率
         ratios = new_probs / old_probs
 
         # PPO目标函数
         surr1 = ratios * advantages
         surr2 = torch.clamp(ratios, 1.0 - self.clip_epsilon, 1.0 + self.clip_epsilon) * advantages
         policy_loss = -torch.min(surr1, surr2).mean()
-
-        # 价值损失
         value_loss = F.mse_loss(values.squeeze(), returns)
 
         # 熵奖励
-        placement_entropy = placement_dist.entropy().mean()
-        next_block_entropy = next_block_dist.entropy().mean()
-        entropy = placement_entropy + next_block_entropy
-
-        # 总损失
+        entropy = placement_dist.entropy().mean() + next_block_dist.entropy().mean()
         loss = policy_loss + 0.5 * value_loss - self.beta * entropy
 
-        # 更新模型
         self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()
@@ -201,7 +222,7 @@ class PPOAgent:
         return loss.item()
 
     def _preprocess_state(self, state):
-        """将状态转换为适合神经网络的格式"""
+        """将单个状态 dict 转换为张量格式"""
         processed = {}
         for k, v in state.items():
             if isinstance(v, np.ndarray):
@@ -210,46 +231,74 @@ class PPOAgent:
                 processed[k] = torch.tensor([v], device=self.device)
         return processed
 
+    def _batch_states(self, state_list):
+        """将多个预处理后的状态 dict 合并为 batched dict"""
+        batch = {}
+        for key in state_list[0]:
+            batch[key] = torch.cat([s[key] for s in state_list], dim=0)
+        return batch
+
 def train():
     env = Tetris2_env()
     input_shape = (1, env.MAPHEIGHT, env.MAPWIDTH)
     agent = PPOAgent(input_shape, num_actions=7)
 
     batch_size = 128
-    episodes = 1000
+    episodes = 10000
     max_steps = 200
 
+    reward_log = []
+
     for episode in range(episodes):
-        print(f"episode = {episode}, training...")
+        print(f"\n=== Episode {episode} ===")
         state = env.reset()
         episode_reward = 0
         done = False
         step_count = 0
 
         while not done and step_count < max_steps:
-            # 获取动作
-            action, prob, value = agent.get_action(state)
+            action, prob, value = agent.get_action(state, env)
 
-            # 执行动作
             next_state, reward, done, info = env.step(action)
 
-            # 存储转换
             agent.store_transition(state, action, prob, value, reward, done)
+
+            print(f"Step {step_count}, Loss: N/A, Reward: {reward:.2f}, Value: {value:.2f}, Action Prob: {prob:.4f}")
+
+            if done:
+                if 'winner' in info:
+                    print(f"The winner is: {info['winner']}!")
+                elif 'reason' in info:
+                    print(f"Game End! Reason: {info['reason']}")
 
             state = next_state
             episode_reward += reward
             step_count += 1
 
-            # 定期更新模型
             if len(agent.memory) >= batch_size:
                 loss = agent.update(batch_size)
-                print(f"Episode {episode}, Step {step_count}, Loss: {loss:.4f}")
+                print(f" -> Training Step: {step_count} Loss: {loss:.4f}")
 
-        print(f"Episode {episode}, Reward: {episode_reward}, Steps: {step_count}")
+        reward_log.append(episode_reward)
 
-        # 定期保存模型
+        print(f"Episode {episode} finished: Total Reward: {episode_reward:.3f}, Steps: {step_count}")
+
+        if (episode + 1) % 10 == 0:
+            avg_reward = np.mean(reward_log[-10:])
+            print(f"Average Reward (last 10 episodes): {avg_reward:.2f}")
+
         if (episode + 1) % 100 == 0:
-            torch.save(agent.policy.state_dict(), f"tetris_ppo_{episode}.pth")
+            torch.save(agent.policy.state_dict(), f"model/tetris_ppo_{episode + 1}.pth")
+            plt.figure()
+            plt.plot(reward_log, label="Reward")
+            plt.xlabel("Episode")
+            plt.ylabel("Reward")
+            plt.title("Training Reward Curve")
+            plt.legend()
+            plt.grid(True)
+            plt.savefig(f"pic/reward_curve_{episode + 1}.png")
+            plt.close()
+
 
 if __name__ == "__main__":
     print("训练开始")

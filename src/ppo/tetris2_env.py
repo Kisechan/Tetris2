@@ -1,8 +1,8 @@
 import sys
 import random
 from copy import deepcopy
-from gym import spaces
 import numpy as np
+
 
 class Tetris2_env:
     def __init__(self):
@@ -121,8 +121,7 @@ class Tetris2_env:
             self.gridInfo[1][0][i] = self.gridInfo[1][self.MAPHEIGHT+1][i] = -2
 
         # 初始化双方方块
-        self.current_piece = np.random.randint(0, 7)
-        self.enemy_piece = np.random.randint(0, 7)
+        self.enemy_piece = self.current_piece = np.random.randint(0, 7)
 
         # 更新方块计数
         self.typeCountForColor[0][self.current_piece] += 1
@@ -287,20 +286,52 @@ class Tetris2_env:
         print("Current Piece:", self.current_piece)
         print("Enemy Piece:", self.enemy_piece)
 
-        print("\nPlayer 0 Grid:")
-        for row in reversed(self.gridInfo[0][1:self.MAPHEIGHT+1]):
-            print(" ".join("X" if x == 1 else "O" if x == -1 else "." if x == 0 else "#" for x in row[1:self.MAPWIDTH+1]))
+        # 定义字符表示
+        SYMBOLS = {
+            -2: '█',  # 墙
+            0: ' ',   # 空气
+            1: '■',   # 旧方块
+            2: '□',   # 新方块
+        }
 
-        print("\nPlayer 1 Grid:")
-        for row in reversed(self.gridInfo[1][1:self.MAPHEIGHT+1]):
-            print(" ".join("X" if x == 1 else "O" if x == -1 else "." if x == 0 else "#" for x in row[1:self.MAPWIDTH+1]))
-        print("="*30)
+        def print_grid(player_id):
+            print(f"\nPlayer {player_id} Grid:")
+            # 打印列号（横坐标）
+            print("   ", end="")
+            for j in range(1, self.MAPWIDTH + 1):
+                print(f"{j%10}", end="")
+            print()
+
+            # 打印每一行（从上往下）
+            for i in range(self.MAPHEIGHT, 0, -1):
+                print(f"{i:2d} ", end="")  # 打印行号
+                for j in range(1, self.MAPWIDTH + 1):
+                    cell = self.gridInfo[player_id][i][j]
+                    print(SYMBOLS.get(cell, '?'), end="")
+                print()
+
+        # 分别打印两个玩家的地图
+        print_grid(0)
+        print_grid(1)
+
+    def get_valid_actions(self):
+        valid_actions = []
+        # 检查棋盘状态，返回所有合法动作（位置和旋转的组合）
+        for o in range(4):
+            for x in range(1, self.MAPWIDTH + 1):
+                # 找到能落下的最低位置
+                for y in range(1, self.MAPHEIGHT + 1):
+                    t = Tetris(self.current_piece, self.currBotColor, self).set(x, y, o)
+                    if t.isValid() and self.checkDirectDropTo(self.currBotColor, self.current_piece, x, y, o) and t.onGround():
+                        valid_actions.append(encode_action(x, y, o, self.MAPWIDTH))
+                        # print(f"Valid Action: x {x} y {y} o {o}")
+        return valid_actions
 
     def step(self, action):
         """
         执行一步动作
         action: 包含两个部分 (placement_action, next_block_action)
-        placement_action: (x, y, rotation) 当前方块的放置位置和旋转
+        placement_action: (x, y, o) 当前方块的放置位置和旋转
         next_block_action: 为对手选择的方块类型 (0-6)
         """
         placement_action, next_block_action = action
@@ -310,14 +341,19 @@ class Tetris2_env:
             return self._get_state(), -1, True, {"reason": "invalid action"}  # 非法动作直接判负
 
         # 2. 放置当前方块
-        x, y, rotation = placement_action
-        tetris = Tetris(self.current_piece, self.currBotColor, self).set(x, y, rotation)
+        x, y, o = placement_action
+        tetris = Tetris(self.current_piece, self.currBotColor, self).set(x, y, o)
         if not tetris.isValid():
             return self._get_state(), -1, True, {"reason": "invalid placement"}
 
+        print(f"x = {x}, y = {y}, o = {o}")
         # 放置方块到地图
-        tetris.place()
+        self.gridInfo = tetris.place()
+        if self.gridInfo is None:
+            print("gridInfo is None")
+            return self._get_state(), -1, True, {"reason": "invalid placement"}
 
+        # self.render()
         # 3. 消除行并处理转移行
         self.eliminate(self.currBotColor)
         result = self.transfer()
@@ -507,7 +543,19 @@ class Tetris:
 
         return True
 
+def encode_action(x, y, o, width):
+    # 注意这里 x 和 y 是从 1 开始的（与环境中一致）
+    return (y - 1) * width * 4 + (x - 1) * 4 + o
+
+def decode_action(idx, width):
+    o = idx % 4
+    x = ((idx // 4) % width) + 1
+    y = ((idx // (4 * width)) % 100) + 1  # 100 是最大高度，避免无限扩展
+    return x, y, o
+
+
 def main():
+    return
     random.seed()
     env = Tetris2_env()
 
