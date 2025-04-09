@@ -863,4 +863,5 @@ def main():
         botzone_keeprunning()
 
 if __name__ == "__main__":
+# 长时运行的改进
     main()
