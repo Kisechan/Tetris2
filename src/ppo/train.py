@@ -8,6 +8,7 @@ from torch.distributions import Categorical
 import torch.nn.functional as F
 from tetris2_env import Tetris2_env, decode_action
 import matplotlib.pyplot as plt
+import os
 
 class PPONetwork(nn.Module):
     def __init__(self, input_shape, num_actions):
@@ -243,13 +244,25 @@ def train():
     input_shape = (1, env.MAPHEIGHT, env.MAPWIDTH)
     agent = PPOAgent(input_shape, num_actions=7)
 
+    checkpoint_path = "checkpoint/ppo_checkpoint_latest.pth"
+    reward_log = []
+    start_episode = 0
+
+    if os.path.exists(checkpoint_path):
+        checkpoint = torch.load(checkpoint_path)
+        agent.policy.load_state_dict(checkpoint['model_state_dict'])
+        agent.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        reward_log = checkpoint['reward_log']
+        start_episode = checkpoint['episode'] + 1
+        print(f"已加载检查点，从第 {start_episode} 集继续训练")
+    else:
+        print("未找到检查点")
+
     batch_size = 128
-    episodes = 10000
+    episodes = 1000
     max_steps = 200
 
-    reward_log = []
-
-    for episode in range(episodes):
+    for episode in range(start_episode, episodes):
         print(f"\n=== Episode {episode} ===")
         state = env.reset()
         episode_reward = 0
@@ -287,7 +300,14 @@ def train():
             avg_reward = np.mean(reward_log[-10:])
             print(f"Average Reward (last 10 episodes): {avg_reward:.2f}")
 
-        if (episode + 1) % 100 == 0:
+        if (episode + 1) % 50 == 0 or episode == 0:
+            torch.save({
+                'episode': episode,
+                'model_state_dict': agent.policy.state_dict(),
+                'optimizer_state_dict': agent.optimizer.state_dict(),
+                'reward_log': reward_log
+            }, f"checkpoint/ppo_checkpoint_{episode + 1}.pth")
+            # 存档
             torch.save(agent.policy.state_dict(), f"model/tetris_ppo_{episode + 1}.pth")
             plt.figure()
             plt.plot(reward_log, label="Reward")
