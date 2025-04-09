@@ -300,7 +300,7 @@ def train():
             avg_reward = np.mean(reward_log[-10:])
             print(f"Average Reward (last 10 episodes): {avg_reward:.2f}")
 
-        if (episode + 1) % 50 == 0 or episode == 0:
+        if (episode + 1) % 100 == 0:
             torch.save({
                 'episode': episode,
                 'model_state_dict': agent.policy.state_dict(),
