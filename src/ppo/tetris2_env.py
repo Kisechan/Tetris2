@@ -348,7 +348,7 @@ class Tetris2_env:
         if not tetris.isValid():
             return self._get_state(), -1, True, {"reason": "invalid placement"}
 
-        print(f"x = {x}, y = {y}, o = {o}")
+        # print(f"x = {x}, y = {y}, o = {o}")
         # 放置方块到地图
         self.gridInfo = tetris.place()
         if self.gridInfo is None:
