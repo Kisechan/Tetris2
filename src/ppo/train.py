@@ -6,7 +6,7 @@ from collections import deque
 import random
 from torch.distributions import Categorical
 import torch.nn.functional as F
-from tetris2_env import Tetris2_env, decode_action
+from .tetris2_env import Tetris2_env, decode_action
 import matplotlib.pyplot as plt
 import os
 
