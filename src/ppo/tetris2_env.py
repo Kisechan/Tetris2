@@ -361,7 +361,7 @@ class Tetris2_env:
         # 4. 检查游戏是否结束
         if result != -1:
             winner = result
-            reward = 1.0 if winner == self.currBotColor else -1.0
+            reward = 10.0 if winner == self.currBotColor else -10.0
             return self._get_state(), reward, True, {"winner": winner}
 
         # 5. 为对手选择方块 (需满足极差<=2的条件)
@@ -378,7 +378,7 @@ class Tetris2_env:
         # 7. 检查新玩家是否能放置方块
         if not self.canPut(self.currBotColor, self.current_piece):
             winner = self.enemyColor  # 当前玩家无法放置，对手获胜
-            reward = 1.0 if winner == 0 else -1.0  # 假设我们总是训练玩家0
+            reward = 10.0 if winner == 0 else -10.0  # 假设我们总是训练玩家0
             return self._get_state(), reward, True, {"winner": winner}
 
         # 8. 计算中间奖励
@@ -415,14 +415,14 @@ class Tetris2_env:
         reward = 0.0
 
         # 1. 消除行奖励
-        reward += self.elimTotal[self.currBotColor] * 0.1
+        reward += self.elimTotal[self.currBotColor] * 1.0
 
         # 2. 高度惩罚 (鼓励保持低高度)
         reward -= self.maxHeight[self.currBotColor] * 0.01
 
         # 3. 孔洞惩罚 (鼓励减少孔洞)
         holes = self._count_holes(self.currBotColor)
-        reward -= holes * 0.05
+        reward -= holes * 0.01
 
         return reward
 
