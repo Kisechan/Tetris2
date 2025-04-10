@@ -90,50 +90,6 @@ class Tetris2_env:
         # 当前方块和对手方块
         self.current_piece = None
         self.enemy_piece = None
-        self.reset()
-
-    def reset(self):
-        # 玩家颜色标识
-        self.currBotColor = 0    # 当前玩家颜色 (0红1蓝)
-        self.enemyColor = 1      # 对手颜色
-
-        # 游戏状态存储
-        self.gridInfo = [
-            [[0]*(self.MAPWIDTH + 2) for _ in range(self.MAPHEIGHT + 2)],  # 玩家0的地图
-            [[0]*(self.MAPWIDTH + 2) for _ in range(self.MAPHEIGHT + 2)]   # 玩家1的地图
-        ]
-
-        # 转移行相关
-        self.trans = [
-            [[0]*(self.MAPWIDTH + 2) for _ in range(6)],  # 玩家0的转移行
-            [[0]*(self.MAPWIDTH + 2) for _ in range(6)]   # 玩家1的转移行
-        ]
-        self.transCount = [0, 0]  # 双方转移行数
-        self.maxHeight = [0, 0]   # 双方当前最大高度
-        self.elimTotal = [0, 0]   # 双方总消除行数
-        self.elimCombo = [0, 0]   # 双方连续消除计数
-        self.elimBonus = [0, 1, 3, 5, 7]  # 消除行数对应的奖励分数
-
-        # 方块类型统计
-        self.typeCountForColor = [
-            [0]*7,  # 玩家0收到的各类方块数量
-            [0]*7   # 玩家1收到的各类方块数量
-        ]
-
-        for i in range(self.MAPHEIGHT + 2):
-            self.gridInfo[0][i][0] = self.gridInfo[0][i][self.MAPWIDTH+1] = -2
-            self.gridInfo[1][i][0] = self.gridInfo[1][i][self.MAPWIDTH+1] = -2
-        for i in range(self.MAPWIDTH + 2):
-            self.gridInfo[0][0][i] = self.gridInfo[0][self.MAPHEIGHT+1][i] = -2
-            self.gridInfo[1][0][i] = self.gridInfo[1][self.MAPHEIGHT+1][i] = -2
-
-        # 初始化双方方块
-        # self.enemy_piece = self.current_piece = np.random.randint(0, 7)
-
-        # 更新方块计数
-        # self.typeCountForColor[0][self.current_piece] += 1
-        # self.typeCountForColor[1][self.enemy_piece] += 1
-        return self._get_state()
 
     def checkDirectDropTo(self, color, blockType, x, y, o):
         """检查方块是否能从顶部直接落到指定位置"""
@@ -333,118 +289,6 @@ class Tetris2_env:
                         # print(f"Valid Action: x {x} y {y} o {o}")
         return valid_actions
 
-    def step(self, action):
-        """
-        执行一步动作
-        action: 包含两个部分 (placement_action, next_block_action)
-        placement_action: (x, y, o) 当前方块的放置位置和旋转
-        next_block_action: 为对手选择的方块类型 (0-6)
-        """
-        placement_action, next_block_action = action
-
-        # 1. 检查动作合法性
-        if not self._is_valid_action(placement_action, next_block_action):
-            return self._get_state(), -1, True, {"reason": "invalid action"}  # 非法动作直接判负
-
-        # 2. 放置当前方块
-        x, y, o = placement_action
-        tetris = Tetris(self.current_piece, self.currBotColor, self).set(x, y, o)
-        if not tetris.isValid():
-            return self._get_state(), -1, True, {"reason": "invalid placement"}
-
-        # print(f"x = {x}, y = {y}, o = {o}")
-        # 放置方块到地图
-        self.gridInfo = tetris.place()
-        if self.gridInfo is None:
-            print("gridInfo is None")
-            return self._get_state(), -1, True, {"reason": "invalid placement"}
-
-        # self.render()
-        # 3. 消除行并处理转移行
-        reward = self.eliminate(self.currBotColor) * 1.0
-        result = self.transfer()
-
-        # 4. 检查游戏是否结束
-        if result != -1:
-            winner = result
-            reward = 10.0 if winner == self.currBotColor else -10.0
-            return self._get_state(), reward, True, {"winner": winner}
-
-        # 5. 为对手选择方块 (需满足极差<=2的条件)
-        if not self._is_valid_next_block(next_block_action):
-            return self._get_state(), -1, True, {"reason": "invalid next block"}
-
-        # 更新方块计数
-        self.typeCountForColor[self.enemyColor][next_block_action] += 1
-
-        # 6. 交换玩家并更新方块
-        self.currBotColor, self.enemyColor = self.enemyColor, self.currBotColor
-        self.current_piece, self.enemy_piece = self.enemy_piece, next_block_action
-
-        # 7. 检查新玩家是否能放置方块
-        if not self.canPut(self.currBotColor, self.current_piece):
-            winner = self.enemyColor  # 当前玩家无法放置，对手获胜
-            reward = 10.0 if winner == 0 else -10.0  # 假设我们总是训练玩家0
-            return self._get_state(), reward, True, {"winner": winner}
-
-        # 8. 计算中间奖励
-        reward += self._calculate_intermediate_reward()
-
-        return self._get_state(), reward, False, {}
-
-    def _is_valid_action(self, placement_action, next_block_action):
-        """检查动作是否合法"""
-        # 检查放置动作
-        x, y, rotation = placement_action
-        if not (1 <= x <= self.MAPWIDTH and 1 <= y <= self.MAPHEIGHT and 0 <= rotation <= 3):
-            return False
-
-        # 检查方块类型
-        if not (0 <= next_block_action <= 6):
-            return False
-
-        # 检查是否能直接下落
-        if not self.checkDirectDropTo(self.currBotColor, self.current_piece, x, y, rotation):
-            return False
-
-        return True
-
-    def _is_valid_next_block(self, block_type):
-        """检查选择的方块是否满足极差<=2的条件"""
-        counts = self.typeCountForColor[self.enemyColor]
-        new_counts = counts.copy()
-        new_counts[block_type] += 1
-        return max(new_counts) - min(new_counts) <= 2
-
-    def _calculate_intermediate_reward(self):
-        """计算中间奖励"""
-        # 存活奖励
-        reward = 0.05
-
-        # 1. 消除行奖励
-        # reward += self.elimTotal[self.currBotColor] * 1.0
-
-        # 2. 高度惩罚 (鼓励保持低高度)
-        reward -= self.maxHeight[self.currBotColor] * 0.01
-
-        # 3. 孔洞惩罚 (鼓励减少孔洞)
-        holes = self._count_holes(self.currBotColor)
-        reward -= holes * 0.01
-
-        return reward
-
-    def _count_holes(self, color):
-        """计算棋盘上的孔洞数量"""
-        holes = 0
-        for x in range(1, self.MAPWIDTH+1):
-            found_block = False
-            for y in range(self.MAPHEIGHT, 0, -1):
-                if self.gridInfo[color][y][x] != 0:
-                    found_block = True
-                elif found_block:
-                    holes += 1
-        return holes
-
     def _get_state(self):
         """获取当前游戏状态"""
         # 将双方棋盘和当前方块信息转换为神经网络输入
@@ -504,9 +348,9 @@ class Tetris:
 
     def place(self):
         """将方块放置到地图上"""
-        if not self.onGround():
-            print(f"err: {self.color}'s block {self.blockType} is not on ground.")
-            return None
+        # if not self.onGround():
+        #     print(f"err: {self.color}'s block {self.blockType} is not on ground.")
+        #     return None
 
         # 将旧方块标记为1
         for oldY in range(1, self.env.MAPHEIGHT):
@@ -722,7 +566,7 @@ def main():
     input_shape = (1, env.MAPHEIGHT, env.MAPWIDTH)
     agent = PPOAgent(input_shape, num_actions=7)
 
-    agent.policy.load_state_dict(torch.load("data/tetris_ppo_500.pth", map_location=torch.device('cpu')))
+    agent.policy.load_state_dict(torch.load("data/model.pth", map_location=torch.device('cpu')))
     agent.policy.eval()
 
     turn = int(input())
@@ -781,12 +625,12 @@ def main():
         env.transfer()
         # env.render(env.enemyColor)
 
+        env.typeCountForColor[env.enemyColor][next_block] += 1
         # print(f"Now enemy blocks: {env.typeCountForColor[env.enemyColor]}")
         state = env._get_state()
         action, _, _ = agent.get_action(state, env)
 
         env.enemy_piece = next_block
-        env.typeCountForColor[env.enemyColor][env.enemy_piece] += 1
 
         placement, next_block = action
         finalX, finalY, finalO = placement
