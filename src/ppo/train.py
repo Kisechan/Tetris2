@@ -6,10 +6,12 @@ from collections import deque
 import random
 from torch.distributions import Categorical
 import torch.nn.functional as F
-from .tetris2_env import Tetris2_env, decode_action
+from tetris2_env import Tetris2_env, decode_action
 import matplotlib.pyplot as plt
 import os
 import copy
+import threading
+import queue
 
 class PPONetwork(nn.Module):
     def __init__(self, input_shape, num_actions):
@@ -242,6 +244,38 @@ class PPOAgent:
             batch[key] = torch.cat([s[key] for s in state_list], dim=0)
         return batch
 
+class Worker(threading.Thread):
+    def __init__(self, worker_id, agent, task_queue, result_queue, max_steps):
+        super(Worker, self).__init__()
+        self.worker_id = worker_id
+        self.agent = agent
+        self.task_queue = task_queue
+        self.result_queue = result_queue
+        self.max_steps = max_steps
+        self.env = Tetris2_env()
+
+    def run(self):
+        while True:
+            task = self.task_queue.get()
+            if task == "STOP":
+                break
+
+            state = self.env.reset()
+            episode_data = []
+
+            for _ in range(self.max_steps):
+                action, prob, value = self.agent.get_action(state, self.env)
+                next_state, reward, done, _ = self.env.step(action)
+
+                episode_data.append((state, action, prob, value, reward, done))
+                state = next_state
+
+                if done:
+                    break
+
+            self.result_queue.put(episode_data)
+            self.task_queue.task_done()
+
 def train():
     env = Tetris2_env()
     input_shape = (1, env.MAPHEIGHT, env.MAPWIDTH)
@@ -262,7 +296,7 @@ def train():
         print("未找到检查点")
 
     batch_size = 128
-    episodes = 1000
+    episodes = 10000
     max_steps = 200
 
     for episode in range(start_episode, episodes):
@@ -279,7 +313,7 @@ def train():
 
             agent.store_transition(state, action, prob, value, reward, done)
 
-            print(f"Step {step_count}, Loss: N/A, Reward: {reward:.2f}, Value: {value:.2f}, Action Prob: {prob:.4f}")
+            print(f"Step {step_count}, Reward: {reward:.2f}, Value: {value:.2f}, Action Prob: {prob:.4f}")
 
             if done:
                 if 'winner' in info:
@@ -322,7 +356,74 @@ def train():
             plt.savefig(f"pic/reward_curve_{episode + 1}.png")
             plt.close()
 
+def train_multithreaded(num_workers=4, episodes=10000, max_steps=200, batch_size=128):
+    agent = PPOAgent((1, 20, 10), num_actions=7)
+    task_queue = queue.Queue()
+    result_queue = queue.Queue()
+
+    checkpoint_path = "checkpoint/ppo_checkpoint_latest.pth"
+    reward_log = []
+    start_episode = 0
+
+    if os.path.exists(checkpoint_path):
+        checkpoint = torch.load(checkpoint_path)
+        agent.policy.load_state_dict(checkpoint['model_state_dict'])
+        agent.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        reward_log = checkpoint['reward_log']
+        start_episode = checkpoint['episode'] + 1
+        print(f"Loaded checkpoint. Resuming from episode {start_episode}.")
+
+    workers = [Worker(i, agent, task_queue, result_queue, max_steps) for i in range(num_workers)]
+    for worker in workers:
+        worker.start()
+
+    for episode in range(start_episode, episodes):
+        print(f"\n=== Episode {episode} ===")
+        for _ in range(num_workers):
+            task_queue.put("RUN")
+
+        task_queue.join()
+
+        all_data = []
+        for _ in range(num_workers):
+            episode_data = result_queue.get()
+            all_data.extend(episode_data)
+
+        for transition in all_data:
+            agent.store_transition(*transition)
+
+        reward = sum([x[4] for x in all_data]) / num_workers
+        reward_log.append(reward)
+
+        print(f" -> Average Reward: {reward:.2f}, Transitions Collected: {len(all_data)}")
+
+        if len(agent.memory) >= batch_size:
+            loss = agent.update(batch_size)
+            print(f" -> Policy Updated. Loss: {loss:.4f}")
+
+        if (episode + 1) % 100 == 0:
+            torch.save({
+                'episode': episode,
+                'model_state_dict': agent.policy.state_dict(),
+                'optimizer_state_dict': agent.optimizer.state_dict(),
+                'reward_log': reward_log
+            }, f"checkpoint/ppo_checkpoint_{episode + 1}.pth")
+            torch.save(agent.policy.state_dict(), f"model/tetris_ppo_{episode + 1}.pth")
+            plt.figure()
+            plt.plot(reward_log)
+            plt.xlabel("Episode")
+            plt.ylabel("Reward")
+            plt.title("Training Reward Curve")
+            plt.grid(True)
+            plt.savefig(f"pic/reward_curve_{episode + 1}.png")
+            plt.close()
+
+    # 停止所有线程
+    for _ in range(num_workers):
+        task_queue.put("STOP")
+    for worker in workers:
+        worker.join()
 
 if __name__ == "__main__":
     print("训练开始")
-    train()
+    train_multithreaded()
