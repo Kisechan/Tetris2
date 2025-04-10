@@ -1,0 +1,7 @@
+**/*.pth
+**/model
+**/data
+**/pic
+**/checkpoint
+!requirements.txt
+**/*.txt
