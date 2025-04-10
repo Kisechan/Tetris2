@@ -358,6 +358,8 @@ class Tetris2_env:
         # self.render()
         # 3. 消除行并处理转移行
         reward = self.eliminate(self.currBotColor) * 1.0
+        if reward > 0:
+            print(">>>Eliminate Successfully!<<<")
         result = self.transfer()
 
         # 4. 检查游戏是否结束
@@ -426,6 +428,10 @@ class Tetris2_env:
         # 3. 孔洞惩罚 (鼓励减少孔洞)
         holes = self._count_holes(self.currBotColor)
         reward -= holes * 0.01
+
+        # 4. 孔洞奖励，鼓励给对方多加孔洞
+        # holes = self._count_holes(self.enemyColor)
+        # reward += holes * 0.001
 
         return reward
 
@@ -558,66 +564,66 @@ def decode_action(idx, width):
 
 
 def main():
-    return
-    random.seed()
-    env = Tetris2_env()
-
-    # 读取输入
-    lines = sys.stdin.read().split('\n')
-
-    ptr = 0
-
-    # 读取回合数
-    turnID = int(lines[ptr])
-    ptr +=1
-
-    # 第一回合特殊处理
-    first = list(map(int, lines[ptr].split()))
-    ptr +=1
-    blockType, currBotColor = first[0], first[1]
-    enemyColor = 1 - currBotColor
-    nextTypeForColor = [blockType, blockType]
-    env.typeCountForColor[0][blockType] +=1
-    env.typeCountForColor[1][blockType] +=1
-
-
-    # 处理历史回合
-    for i in range(1, turnID):
-        currType = [nextTypeForColor[0], nextTypeForColor[1]]
-
-        # 读取我方上一步操作
-        myAct = list(map(int, lines[ptr].split()))
-        ptr +=1
-        bt, x, y, o = myAct
-        myBlock = Tetris(env, currType[currBotColor], currBotColor).set(x, y, o)
-        env = myBlock.place()
-        if env == None:
-            print(f"放置方块无效")
-            return
-        env.typeCountForColor[enemyColor][bt] +=1
-        nextTypeForColor[enemyColor] = bt
-
-        # 读取对方上一步操作
-        enemyAct = list(map(int, lines[ptr].split()))
-        ptr +=1
-        bt, x, y, o = enemyAct
-        enemyBlock = Tetris(currType[enemyColor], enemyColor).set(x, y, o)
-        enemyBlock.place()
-        env.typeCountForColor[currBotColor][bt] +=1
-        nextTypeForColor[currBotColor] = bt
-
-        # 消除行和转移处理
-        env.eliminate(0)
-        env.eliminate(1)
-        env.transfer()
-
-    # 决策
-
-    # 决策选择落点
-    blockForEnemy, finalX, finalY, finalO = 1 # 决策，稍后实现
-
-    # 输出决策(方块类型, x, y, 旋转状态)
-    print(f"{blockForEnemy} {finalX} {finalY} {finalO}")
+    pass
+    # random.seed()
+    # env = Tetris2_env()
+    #
+    # # 读取输入
+    # lines = sys.stdin.read().split('\n')
+    #
+    # ptr = 0
+    #
+    # # 读取回合数
+    # turnID = int(lines[ptr])
+    # ptr +=1
+    #
+    # # 第一回合特殊处理
+    # first = list(map(int, lines[ptr].split()))
+    # ptr +=1
+    # blockType, currBotColor = first[0], first[1]
+    # enemyColor = 1 - currBotColor
+    # nextTypeForColor = [blockType, blockType]
+    # env.typeCountForColor[0][blockType] +=1
+    # env.typeCountForColor[1][blockType] +=1
+    #
+    #
+    # # 处理历史回合
+    # for i in range(1, turnID):
+    #     currType = [nextTypeForColor[0], nextTypeForColor[1]]
+    #
+    #     # 读取我方上一步操作
+    #     myAct = list(map(int, lines[ptr].split()))
+    #     ptr +=1
+    #     bt, x, y, o = myAct
+    #     myBlock = Tetris(env, currType[currBotColor], currBotColor).set(x, y, o)
+    #     env = myBlock.place()
+    #     if env == None:
+    #         print(f"放置方块无效")
+    #         return
+    #     env.typeCountForColor[enemyColor][bt] +=1
+    #     nextTypeForColor[enemyColor] = bt
+    #
+    #     # 读取对方上一步操作
+    #     enemyAct = list(map(int, lines[ptr].split()))
+    #     ptr +=1
+    #     bt, x, y, o = enemyAct
+    #     enemyBlock = Tetris(currType[enemyColor], enemyColor).set(x, y, o)
+    #     enemyBlock.place()
+    #     env.typeCountForColor[currBotColor][bt] +=1
+    #     nextTypeForColor[currBotColor] = bt
+    #
+    #     # 消除行和转移处理
+    #     env.eliminate(0)
+    #     env.eliminate(1)
+    #     env.transfer()
+    #
+    # # 决策
+    #
+    # # 决策选择落点
+    # blockForEnemy, finalX, finalY, finalO = 1 # 决策，稍后实现
+    #
+    # # 输出决策(方块类型, x, y, 旋转状态)
+    # print(f"{blockForEnemy} {finalX} {finalY} {finalO}")
 
 if __name__ == "__main__":
     main()
