@@ -9,6 +9,7 @@ import torch.nn.functional as F
 from .tetris2_env import Tetris2_env, decode_action
 import matplotlib.pyplot as plt
 import os
+import copy
 
 class PPONetwork(nn.Module):
     def __init__(self, input_shape, num_actions):
@@ -121,7 +122,8 @@ class PPOAgent:
 
             for next_block in range(7):
                 # 假设选择了该方块，更新对方的方块数量
-                temp_piece_count = piece_count[opponent_color][:]
+                temp_piece_count = copy.deepcopy(piece_count[opponent_color])
+                # 深拷贝
                 temp_piece_count[next_block] += 1
 
                 # 检查对方方块数量的极差是否超过2
@@ -146,6 +148,7 @@ class PPOAgent:
                           next_block_dist.log_prob(next_block_action).exp()
 
             return (placement_action, next_block_action.item()), action_prob.item(), value.item()
+
 
 
     def store_transition(self, state, action, prob, value, reward, done):
