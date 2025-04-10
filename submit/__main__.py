@@ -9,6 +9,8 @@ from torch.distributions import Categorical
 import torch.nn.functional as F
 from collections import deque
 import numpy as np
+import copy
+
 class Tetris2_env:
     def __init__(self):
         # 游戏常量定义
@@ -126,11 +128,11 @@ class Tetris2_env:
             self.gridInfo[1][0][i] = self.gridInfo[1][self.MAPHEIGHT+1][i] = -2
 
         # 初始化双方方块
-        self.enemy_piece = self.current_piece = np.random.randint(0, 7)
+        # self.enemy_piece = self.current_piece = np.random.randint(0, 7)
 
         # 更新方块计数
-        self.typeCountForColor[0][self.current_piece] += 1
-        self.typeCountForColor[1][self.enemy_piece] += 1
+        # self.typeCountForColor[0][self.current_piece] += 1
+        # self.typeCountForColor[1][self.enemy_piece] += 1
         return self._get_state()
 
     def checkDirectDropTo(self, color, blockType, x, y, o):
@@ -287,11 +289,9 @@ class Tetris2_env:
             simulated[y][x] = 2
         return simulated
 
-    def render(self, mode='human'):
+    def render(self, player):
         """可视化游戏状态"""
-        print(f"Current Player: {self.currBotColor}")
-        print("Current Piece:", self.current_piece)
-        print("Enemy Piece:", self.enemy_piece)
+        print(f"Current Player: {player}")
 
         # 定义字符表示
         SYMBOLS = {
@@ -317,10 +317,7 @@ class Tetris2_env:
                     print(SYMBOLS.get(cell, '?'), end="")
                 print()
 
-        # 分别打印两个玩家的地图
-        print_grid(0)
-        print("="*30)
-        print_grid(1)
+        print_grid(player)
         print("="*30)
 
     def get_valid_actions(self):
@@ -508,6 +505,7 @@ class Tetris:
     def place(self):
         """将方块放置到地图上"""
         if not self.onGround():
+            print(f"err: {self.color}'s block {self.blockType} is not on ground.")
             return None
 
         # 将旧方块标记为1
@@ -674,7 +672,8 @@ class PPOAgent:
 
             for next_block in range(7):
                 # 假设选择了该方块，更新对方的方块数量
-                temp_piece_count = piece_count[opponent_color][:]
+                temp_piece_count = copy.deepcopy(piece_count[opponent_color])
+                # 深拷贝
                 temp_piece_count[next_block] += 1
 
                 # 检查对方方块数量的极差是否超过2
@@ -704,77 +703,6 @@ class PPOAgent:
     def store_transition(self, state, action, prob, value, reward, done):
         self.memory.append((state, action, prob, value, reward, done))
 
-    def update(self, batch_size):
-        if len(self.memory) < batch_size:
-            return
-
-        samples = random.sample(self.memory, batch_size)
-        states, actions, old_probs, old_values, rewards, dones = zip(*samples)
-
-        # 预处理所有状态
-        states = [self._preprocess_state(s) for s in states]
-        batched_states = self._batch_states(states)
-
-        # 折扣回报和优势
-        returns = []
-        advantages = []
-        R = 0
-        for i in reversed(range(len(rewards))):
-            R = rewards[i] + self.gamma * R * (1 - dones[i])
-            returns.insert(0, R)
-            advantages.insert(0, R - old_values[i])
-
-        advantages = torch.tensor(advantages, device=self.device).float()
-        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-        returns = torch.tensor(returns, device=self.device).float()
-        old_probs = torch.tensor(old_probs, device=self.device).float()
-        old_values = torch.tensor(old_values, device=self.device).float()
-
-        # 获取动作张量
-        width = batched_states["current_grid"].shape[-1]
-        height = batched_states["current_grid"].shape[-2]
-
-        placement_actions = []
-        next_block_actions = []
-        for action in actions:
-            placement, next_block = action
-            placement_flat = (placement[1]-1)*width*4 + (placement[0]-1)*4 + placement[2]
-            placement_actions.append(placement_flat)
-            next_block_actions.append(next_block)
-
-        placement_actions = torch.tensor(placement_actions, device=self.device).long()
-        next_block_actions = torch.tensor(next_block_actions, device=self.device).long()
-
-        # 预测
-        placement_logits, next_block_logits, values = self.policy(batched_states)
-
-        placement_probs = torch.softmax(placement_logits.view(batch_size, -1), dim=-1)
-        placement_dist = Categorical(placement_probs)
-        placement_log_probs = placement_dist.log_prob(placement_actions)
-
-        next_block_probs = torch.softmax(next_block_logits, dim=-1)
-        next_block_dist = Categorical(next_block_probs)
-        next_block_log_probs = next_block_dist.log_prob(next_block_actions)
-
-        new_probs = (placement_log_probs + next_block_log_probs).exp()
-        ratios = new_probs / old_probs
-
-        # PPO目标函数
-        surr1 = ratios * advantages
-        surr2 = torch.clamp(ratios, 1.0 - self.clip_epsilon, 1.0 + self.clip_epsilon) * advantages
-        policy_loss = -torch.min(surr1, surr2).mean()
-        value_loss = F.mse_loss(values.squeeze(), returns)
-
-        # 熵奖励
-        entropy = placement_dist.entropy().mean() + next_block_dist.entropy().mean()
-        loss = policy_loss + 0.5 * value_loss - self.beta * entropy
-
-        self.optimizer.zero_grad()
-        loss.backward()
-        self.optimizer.step()
-
-        return loss.item()
-
     def _preprocess_state(self, state):
         """将单个状态 dict 转换为张量格式"""
         processed = {}
@@ -784,13 +712,6 @@ class PPOAgent:
             else:
                 processed[k] = torch.tensor([v], device=self.device)
         return processed
-
-    def _batch_states(self, state_list):
-        """将多个预处理后的状态 dict 合并为 batched dict"""
-        batch = {}
-        for key in state_list[0]:
-            batch[key] = torch.cat([s[key] for s in state_list], dim=0)
-        return batch
 
 def botzone_keeprunning():
     print("\n>>>BOTZONE_REQUEST_KEEP_RUNNING<<<")
@@ -805,16 +726,24 @@ def main():
     agent.policy.eval()
 
     turn = int(input())
+    # 回合数
     t, c = input().split()
     t = int(t)
+    # 当前方块，敌方我方方块类型相同
     c = int(c)
+    # 我方颜色
 
     env.current_piece = t
     env.enemy_piece = t
+
     env.currBotColor = c
     env.enemyColor = 1 - c
 
+    env.typeCountForColor[env.currBotColor][t] += 1
+    env.typeCountForColor[env.enemyColor][t] += 1
+
     state = env._get_state()
+    # print(f"Now enemy blocks: {env.typeCountForColor[env.enemyColor]}")
     action, _, _ = agent.get_action(state, env)
 
     placement, next_block = action
@@ -823,10 +752,12 @@ def main():
     tetris = Tetris(env.current_piece, env.currBotColor, env).set(finalX, finalY, finalO)
     env.gridInfo = tetris.place()
     env.eliminate(env.currBotColor)
+    env.eliminate(env.enemyColor)
     env.transfer()
 
     print(f"{next_block} {finalX} {finalY} {finalO}")
     botzone_keeprunning()
+    # env.render(env.currBotColor)
 
     while(True):
         line = input().split()
@@ -834,22 +765,28 @@ def main():
             continue
         t, x, y, o = line
         t = int(t)
+        # 敌方给出的方块
         x = int(x)
         y = int(y)
         o = int(o)
+        # 敌方上回合放置方块的位置、旋转状态
 
         env.current_piece = t
+        env.typeCountForColor[env.currBotColor][t] += 1
 
         tetris = Tetris(env.enemy_piece, env.enemyColor, env).set(x, y, o)
         env.gridInfo = tetris.place()
-        # env.render()
+        env.eliminate(env.currBotColor)
         env.eliminate(env.enemyColor)
         env.transfer()
+        # env.render(env.enemyColor)
 
+        # print(f"Now enemy blocks: {env.typeCountForColor[env.enemyColor]}")
         state = env._get_state()
         action, _, _ = agent.get_action(state, env)
 
         env.enemy_piece = next_block
+        env.typeCountForColor[env.enemyColor][env.enemy_piece] += 1
 
         placement, next_block = action
         finalX, finalY, finalO = placement
@@ -857,7 +794,9 @@ def main():
         tetris = Tetris(env.current_piece, env.currBotColor, env).set(finalX, finalY, finalO)
         env.gridInfo = tetris.place()
         env.eliminate(env.currBotColor)
+        env.eliminate(env.enemyColor)
         env.transfer()
+        # env.render(env.currBotColor)
 
         print(f"{next_block} {finalX} {finalY} {finalO}")
         botzone_keeprunning()
