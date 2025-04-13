@@ -337,12 +337,15 @@ class Tetris2_env:
         next_block_action: 为对手选择的方块类型 (0-6)
         """
         placement_action, next_block_action = action
+        reward = 0.05
 
-        # 1. 检查动作合法性
+        # 检查动作合法性
         if not self._is_valid_action(placement_action, next_block_action):
             return self._get_state(), -1, True, {"reason": "invalid action"}  # 非法动作直接判负
 
-        # 2. 放置当前方块
+        old_height = self.maxHeight[self.currBotColor]
+        old_holes = self._count_holes(self.currBotColor)
+        # 放置当前方块
         x, y, o = placement_action
         tetris = Tetris(self.current_piece, self.currBotColor, self).set(x, y, o)
         if not tetris.isValid():
@@ -355,38 +358,45 @@ class Tetris2_env:
             print("gridInfo is None")
             return self._get_state(), -1, True, {"reason": "invalid placement"}
 
-        # self.render()
-        # 3. 消除行并处理转移行
-        reward = self.eliminate(self.currBotColor) * 1.0
-        if reward > 0:
+        # 消除行并处理转移行
+        lines_cleared = self.eliminate(self.currBotColor)
+        if lines_cleared > 0:
             print(">>>Eliminate Successfully!<<<")
+            reward += [0, 22.5, 25.5, 29.0, 32.0, 35.0, 40.0, 45.0, 50.0, 55.0][lines_cleared]
         result = self.transfer()
+        reward -= (self.maxHeight[self.currBotColor] - old_height) * 0.4
 
-        # 4. 检查游戏是否结束
+        # 孔洞惩罚 (鼓励减少孔洞)
+        holes = self._count_holes(self.currBotColor)
+        reward -= (holes - old_holes) * 1.0
+
+        # print(f"Now, color: {self.currBotColor}, Eliminated lines: {lines_cleared}, Current height: {self.maxHeight[self.currBotColor]}, Added height: {self.maxHeight[self.currBotColor] - old_height}, Holes: {holes}.")
+        # self.render()
+
+        # 检查游戏是否结束
         if result != -1:
             winner = result
-            reward = 10.0 if winner == self.currBotColor else -10.0
+            reward = 10.0 if winner == self.currBotColor else -5.0
+            print(f"Winner color: {self.currBotColor}, Current height: {self.maxHeight[self.currBotColor]}, Holes: {holes}.")
             return self._get_state(), reward, True, {"winner": winner}
 
-        # 5. 为对手选择方块 (需满足极差<=2的条件)
+        # 为对手选择方块 (需满足极差<=2的条件)
         if not self._is_valid_next_block(next_block_action):
             return self._get_state(), -1, True, {"reason": "invalid next block"}
 
         # 更新方块计数
         self.typeCountForColor[self.enemyColor][next_block_action] += 1
 
-        # 6. 交换玩家并更新方块
+        # 交换玩家并更新方块
         self.currBotColor, self.enemyColor = self.enemyColor, self.currBotColor
         self.current_piece, self.enemy_piece = self.enemy_piece, next_block_action
 
-        # 7. 检查新玩家是否能放置方块
+        # 检查新玩家是否能放置方块
         if not self.canPut(self.currBotColor, self.current_piece):
             winner = self.enemyColor  # 当前玩家无法放置，对手获胜
-            reward = 10.0 if winner == 0 else -10.0  # 假设我们总是训练玩家0
+            reward = 10.0 if winner == 0 else -5.0  # 假设我们总是训练玩家0
+            print(f"Winner color: {self.currBotColor}, Current height: {self.maxHeight[self.currBotColor]}, Holes: {holes}.")
             return self._get_state(), reward, True, {"winner": winner}
-
-        # 8. 计算中间奖励
-        reward += self._calculate_intermediate_reward()
 
         return self._get_state(), reward, False, {}
 
@@ -419,17 +429,11 @@ class Tetris2_env:
         # 存活奖励
         reward = 0.05
 
-        # 1. 消除行奖励
-        # reward += self.elimTotal[self.currBotColor] * 1.0
-
-        # 2. 高度惩罚 (鼓励保持低高度)
-        reward -= self.maxHeight[self.currBotColor] * 0.01
-
-        # 3. 孔洞惩罚 (鼓励减少孔洞)
+        # 孔洞惩罚 (鼓励减少孔洞)
         holes = self._count_holes(self.currBotColor)
-        reward -= holes * 0.01
+        reward -= holes * 0.05
 
-        # 4. 孔洞奖励，鼓励给对方多加孔洞
+        # 孔洞奖励，鼓励给对方多加孔洞
         # holes = self._count_holes(self.enemyColor)
         # reward += holes * 0.001
 
@@ -561,69 +565,3 @@ def decode_action(idx, width):
     x = ((idx // 4) % width) + 1
     y = ((idx // (4 * width)) % 100) + 1  # 100 是最大高度，避免无限扩展
     return x, y, o
-
-
-def main():
-    pass
-    # random.seed()
-    # env = Tetris2_env()
-    #
-    # # 读取输入
-    # lines = sys.stdin.read().split('\n')
-    #
-    # ptr = 0
-    #
-    # # 读取回合数
-    # turnID = int(lines[ptr])
-    # ptr +=1
-    #
-    # # 第一回合特殊处理
-    # first = list(map(int, lines[ptr].split()))
-    # ptr +=1
-    # blockType, currBotColor = first[0], first[1]
-    # enemyColor = 1 - currBotColor
-    # nextTypeForColor = [blockType, blockType]
-    # env.typeCountForColor[0][blockType] +=1
-    # env.typeCountForColor[1][blockType] +=1
-    #
-    #
-    # # 处理历史回合
-    # for i in range(1, turnID):
-    #     currType = [nextTypeForColor[0], nextTypeForColor[1]]
-    #
-    #     # 读取我方上一步操作
-    #     myAct = list(map(int, lines[ptr].split()))
-    #     ptr +=1
-    #     bt, x, y, o = myAct
-    #     myBlock = Tetris(env, currType[currBotColor], currBotColor).set(x, y, o)
-    #     env = myBlock.place()
-    #     if env == None:
-    #         print(f"放置方块无效")
-    #         return
-    #     env.typeCountForColor[enemyColor][bt] +=1
-    #     nextTypeForColor[enemyColor] = bt
-    #
-    #     # 读取对方上一步操作
-    #     enemyAct = list(map(int, lines[ptr].split()))
-    #     ptr +=1
-    #     bt, x, y, o = enemyAct
-    #     enemyBlock = Tetris(currType[enemyColor], enemyColor).set(x, y, o)
-    #     enemyBlock.place()
-    #     env.typeCountForColor[currBotColor][bt] +=1
-    #     nextTypeForColor[currBotColor] = bt
-    #
-    #     # 消除行和转移处理
-    #     env.eliminate(0)
-    #     env.eliminate(1)
-    #     env.transfer()
-    #
-    # # 决策
-    #
-    # # 决策选择落点
-    # blockForEnemy, finalX, finalY, finalO = 1 # 决策，稍后实现
-    #
-    # # 输出决策(方块类型, x, y, 旋转状态)
-    # print(f"{blockForEnemy} {finalX} {finalY} {finalO}")
-
-if __name__ == "__main__":
-    main()

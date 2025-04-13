@@ -356,7 +356,7 @@ def train():
             plt.savefig(f"pic/reward_curve_{episode + 1}.png")
             plt.close()
 
-def train_multithreaded(num_workers=4, episodes=10000, max_steps=200, batch_size=128):
+def train_multithreaded(num_workers=8, episodes=10000, max_steps=200, batch_size=128):
     agent = PPOAgent((1, 20, 10), num_actions=7)
     task_queue = queue.Queue()
     result_queue = queue.Queue()
