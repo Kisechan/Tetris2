@@ -408,7 +408,7 @@ class TetrisGame:
     def findBestSpot(self):
         """寻找最佳落点(改进后的策略)"""
         bestScore = -float('inf')
-        bestX, bestY, bestO = 1, 1, 0
+        bestX, bestY, bestO = -1, -1, -1
 
         # 遍历所有可能的位置和旋转状态
         for o in range(4):
@@ -432,6 +432,25 @@ class TetrisGame:
                 print(self.gridInfo[color][j][i], end=" ")
             print()
 
+    def calWorst(self, blockType, color):
+        self.blockType = blockType
+        self.color = color
+
+        bestScore = -float('inf')
+
+        # 遍历所有可能的位置和旋转状态
+        for o in range(4):
+            for x in range(1, MAPWIDTH+1):
+                # 找到能落下的最低位置
+                for y in range(1, MAPHEIGHT+1):
+                    self.set(x, y, o)
+                    if self.isValid() and self.checkDirectDropTo(x, y, o) and self.onGround():
+                        simulated = self.simulatePlace(x, y, o, self.blockType)
+                        params = self.calculateParameters(simulated)
+                        score = self.evaluatePosition(params)
+                        bestScore = max(bestScore, score)
+
+        return bestScore
 
 def main():
     random.seed()
@@ -490,25 +509,34 @@ def main():
     # 当前回合决策
     tetris.setColor(tetris.currBotColor)
     tetris.setBlock(nextTypeForColor[tetris.currBotColor])
-
     # 选择落点
     finalX, finalY, finalO = tetris.findBestSpot()
+    tetris.set(finalX, finalY, finalO)
+    tetris.place()
+
+    tetris.setColor(tetris.enemyColor)
+    tetris.setBlock(nextTypeForColor[tetris.enemyColor])
+    enemyX, enemyY, enemyO = tetris.findBestSpot()
+    tetris.set(enemyX, enemyY, enemyO)
+    tetris.place()
+
+    tetris.eliminate(0)
+    tetris.eliminate(1)
+    tetris.transfer()
 
     # 选择给对方的方块类型
-    maxCount = max(tetris.typeCountForColor[tetris.enemyColor])
     minCount = min(tetris.typeCountForColor[tetris.enemyColor])
 
     blockForEnemy = -1
-    if maxCount - minCount == 2:
-        # 如果某种方块太多，选择非最大数量的方块
-        for bt in range(7):
-            if tetris.typeCountForColor[tetris.enemyColor][bt] != maxCount:
-                blockForEnemy = bt
-                break
-    else:
-        # 随机选择，但避免连续给同一种方块
-        lastGiven = nextTypeForColor[tetris.enemyColor]
-        blockForEnemy = random.choice([i for i in range(7) if i != lastGiven or random.random() < 0.3])
+    scoreList = []
+    for i in range(7):
+        score = tetris.calWorst(i, tetris.enemyColor)
+        scoreList.append([i, score])
+    scoreList.sort(key=lambda x: x[1], reverse=False)
+    for i in range(7):
+        if tetris.typeCountForColor[tetris.enemyColor][scoreList[i][0]] != minCount + 2:
+            blockForEnemy = scoreList[i][0]
+            break
 
     # 输出决策(方块类型, x, y, 旋转状态)
     print(f"{blockForEnemy} {finalX} {finalY} {finalO}")

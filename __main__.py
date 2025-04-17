@@ -1,5 +1,7 @@
 import sys
 import random
+import math
+import copy
 from copy import deepcopy
 
 MAPWIDTH = 10
@@ -45,6 +47,7 @@ class TetrisGame:
     def __init__(self):
         self.currBotColor = 0
         self.enemyColor = 1
+        self.moves_made = 0
         self.gridInfo = [
             [[0]*(MAPWIDTH + 2) for _ in range(MAPHEIGHT + 2)],  # 玩家0的地图
             [[0]*(MAPWIDTH + 2) for _ in range(MAPHEIGHT + 2)]   # 玩家1的地图
@@ -58,6 +61,8 @@ class TetrisGame:
         self.elimTotal = [0, 0]   # 双方总消除行数
         self.elimCombo = [0, 0]   # 双方连续消除计数
         self.elimBonus = [0, 1, 3, 5, 7]  # 消除行数对应的奖励分数
+        self.currBlockType = [0, 0]
+        self.nextBlockType = [0, 0]
 
         # 方块类型统计
         self.typeCountForColor = [
@@ -77,6 +82,7 @@ class TetrisGame:
         self.blockX = -1            # 当前x坐标(未初始化)
         self.blockY = -1            # 当前y坐标(未初始化)
         self.orientation = -1       # 当前旋转状态(0-3)
+        self.lose = -1
 
 
     def calculateParameters(self, simulatedGrid):
@@ -343,7 +349,8 @@ class TetrisGame:
 
             h2 = self.maxHeight[color2] + self.transCount[color1]
             if h2 > MAPHEIGHT:
-                return color2  # 对方场地溢出，对方输
+                self.lose = color2
+                return
 
             # 将对方的行上移
             for y in range(h2, self.transCount[color1], -1):
@@ -361,8 +368,12 @@ class TetrisGame:
             h2 = self.maxHeight[color2] + self.transCount[color1] - self.transCount[color2]
 
             # 检查是否溢出
-            if h1 > MAPHEIGHT: return color1
-            if h2 > MAPHEIGHT: return color2
+            if h1 > MAPHEIGHT:
+                self.lose = color1
+                return
+            if h2 > MAPHEIGHT:
+                self.lose = color2
+                return
 
             # 处理color2的场地(添加color1的转移行)
             temp1 = []
@@ -416,7 +427,9 @@ class TetrisGame:
                 # 找到能落下的最低位置
                 for y in range(1, MAPHEIGHT+1):
                     self.set(x, y, o)
-                    if self.isValid() and self.checkDirectDropTo(x, y, o) and self.onGround():
+                    if not self.isValid() or not self.onGround():
+                        continue
+                    if self.checkDirectDropTo(x, y, o):
                         simulated = self.simulatePlace(x, y, o, self.blockType)
                         params = self.calculateParameters(simulated)
                         score = self.evaluatePosition(params)
@@ -431,6 +444,260 @@ class TetrisGame:
             for i in range(0, MAPWIDTH + 2):
                 print(self.gridInfo[color][j][i], end=" ")
             print()
+
+    def calWorst(self, blockType, color):
+        self.blockType = blockType
+        self.color = color
+
+        bestScore = -float('inf')
+
+        # 遍历所有可能的位置和旋转状态
+        for o in range(4):
+            for x in range(1, MAPWIDTH+1):
+                # 找到能落下的最低位置
+                for y in range(1, MAPHEIGHT+1):
+                    self.set(x, y, o)
+                    if self.isValid() and self.checkDirectDropTo(x, y, o) and self.onGround():
+                        simulated = self.simulatePlace(x, y, o, self.blockType)
+                        params = self.calculateParameters(simulated)
+                        score = self.evaluatePosition(params)
+                        bestScore = max(bestScore, score)
+
+        return bestScore
+
+    """
+    def get_legal_moves(self):
+        legal = []
+        legalType = []
+        minCount = min(self.typeCountForColor[1 - self.color])
+        for i in range(7):
+            if self.typeCountForColor[1 - self.color][i] < minCount + 2:
+                legalType.append(i)
+        for o in range(4):
+            for x in range(1, MAPWIDTH+1):
+                for y in range(1, MAPHEIGHT+1):
+                    self.set(x, y, o)
+                    if self.isValid() and self.checkDirectDropTo(x, y, o) and self.onGround():
+                        for q in legalType:
+                            legal.append((x, y, o, q))
+        if len(legal) == 0:
+            self.lose = self.color
+        return legal
+    """
+
+    def get_legal_moves(self, K = 6):
+        # 1) 先算出所有 (x,y,o) 的合法落点
+        candidates = []
+        legal = []
+        for o in range(4):
+            for x in range(1, MAPWIDTH+1):
+                for y in range(1, MAPHEIGHT+1):
+                    self.set(x, y, o)
+                    if not self.isValid() or not self.onGround():
+                        continue
+                    if self.checkDirectDropTo(x, y, o):
+                        sim = self.simulatePlace(x, y, o, self.blockType)
+                        score = self.evaluatePosition(self.calculateParameters(sim))
+                        candidates.append(((x, y, o), score))
+        # 2) 按 score 排序，取前 K 个
+        candidates.sort(key=lambda x: x[1], reverse=True)
+        top_xyz = [move for move,_ in candidates[:K]]
+
+        legalType = []
+        minCount = min(self.typeCountForColor[1 - self.color])
+        for i in range(7):
+            if self.typeCountForColor[1 - self.color][i] < minCount + 2:
+                legalType.append(i)
+
+        for (x,y,o) in top_xyz:
+            for b in legalType:
+                legal.append((x, y, o, b))
+        return legal
+
+    def apply_move(self, move):
+        x, y, o, TypeForEnemy = move
+        self.set(x, y, o)
+        self.place()
+
+    def evaluate(self):
+        """
+        对当前局面进行评估，返回己方分值与对手分值之差。
+        假设 self.color 表示当前玩家，对手为 1 - self.color。
+        """
+        my_params = self.calculateParameters(self.gridInfo[self.color])
+        opp_params = self.calculateParameters(self.gridInfo[1 - self.color])
+        my_score = self.evaluatePosition(my_params)
+        opp_score = self.evaluatePosition(opp_params)
+        return my_score - opp_score
+
+    def updateBlock(self):
+        self.currBlockType = copy.deepcopy(self.nextBlockType)
+        self.nextBlockType = [0, 0]
+
+    def advance_turn(self):
+        """
+        更新回合信息：当双方均已行动后执行行消除和行转移，
+        然后重置计数器，为下一回合做准备，并切换当前决策方。
+        """
+        self.moves_made += 1
+        if self.moves_made >= 2:
+            self.eliminate(0)
+            self.eliminate(1)
+            self.transfer()
+            # 重置计数器，表示新一轮开始
+            self.moves_made = 0
+            self.updateBlock()
+            # 如果需要在模型中切换决策方（比如 MCTS 中 current_player），也在这里更新：
+        self.color = 1 - self.color
+        self.setBlock(self.currBlockType[self.color])
+
+EXPLORATION_CONSTANT = 1.41  # UCB 中的探索常数
+
+class MCTSNode:
+    def __init__(self, state, move=None, parent=None, player=0):
+        """
+        state: 游戏状态（需是 TetrisGame 的一个深拷贝，并实现上面提到的接口）
+        move: 从父状态到该状态的落点动作，通常形式为 (x, y, o)
+        parent: 父节点
+        player: 该节点对应的走子玩家标记（例如 0 或 1）
+        """
+        self.state = state
+        self.move = move
+        self.parent = parent
+        self.children = []
+        self.legalMove = state.get_legal_moves()
+        self.visits = 0
+        self.total_value = 0
+        self.player = player
+
+    def is_fully_expanded(self):
+        """判断当前节点是否已扩展所有合法动作"""
+        return len(self.children) == len(self.legalMove)
+
+    def best_child(self, exploration=EXPLORATION_CONSTANT):
+        """
+        选择当前节点下的最佳子节点。
+        利用 UCB1 公式： score = (child.total_value/child.visits) + exploration * sqrt( ln(parent.visits)/child.visits )
+        当 exploration 参数为 0 时，即只基于利用值选最佳动作。
+        """
+        best_score = -float('inf')
+        best_node = None
+        for child in self.children:
+            exploit = child.total_value / child.visits if child.visits > 0 else 0
+            explore = math.sqrt(math.log(self.visits) / child.visits) if child.visits > 0 else float('inf')
+            score = exploit + exploration * explore
+            if score > best_score:
+                best_score = score
+                best_node = child
+        return best_node
+
+    def expand(self):
+        """
+        扩展一个未尝试过的动作，返回新扩展的子节点。
+        这里随机选择一个尚未扩展的合法动作进行扩展。
+        """
+        tried_moves = [child.move for child in self.children]
+        untried_moves = [m for m in self.legalMove if m not in tried_moves]
+        if not untried_moves:
+            return None
+        move = random.choice(untried_moves)
+        new_state = deepcopy(self.state)
+        new_state.apply_move(move)
+        new_state.advance_turn()  # 切换到对手或下一个回合
+        child_node = MCTSNode(new_state, move=move, parent=self, player=new_state.color)
+        self.children.append(child_node)
+        return child_node
+
+    def backpropagate(self, value):
+        """
+        将一次模拟的评估结果反向传播至整棵树上。
+        value：本次模拟返回的评估值（从根节点视角）
+        """
+        self.visits += 1
+        self.total_value += value
+        if self.parent:
+            self.parent.backpropagate(value)
+
+
+def rollout_policy(state):
+    """
+    简单的 rollout 策略：在状态中随机选择一个合法动作。
+    你也可以在这里加入一定的启发式改进。
+    """
+    legal_moves = state.get_legal_moves()
+    if not legal_moves:
+        return None
+    return random.choice(legal_moves)
+
+
+def rollout(state, rollout_depth = 3):
+    """
+    从给定状态开始展开随机模拟（rollout）直至达到 rollout_depth 或者无法行动，
+    并返回最终状态的评估值。评估函数应以根节点玩家的角度给出结果。
+    """
+    current_state = deepcopy(state)
+    current_depth = 0
+    current_color = current_state.color
+    while current_depth < rollout_depth:
+        if current_state.lose != -1:
+            if current_state.lose == current_color:
+                return -float('inf')
+            else:
+                return float('inf')
+        move = rollout_policy(current_state)
+        current_state.apply_move(move)
+        current_state.advance_turn()
+        current_depth += 1
+        if current_state.lose != -1:
+            if current_state.lose == current_color:
+                return -float('inf')
+            else:
+                return float('inf')
+
+    final_evaluation = current_state.evaluate()
+    if current_state.color != current_color:
+        final_evaluation *= -1
+    return current_state.evaluate()
+
+def mcts_search(root_state, iterations=100, rollout_depth=3):
+    """
+    对根状态进行蒙特卡洛树搜索，执行若干次迭代后返回最佳动作。
+    参数：
+      root_state: 当前局面（应为 TetrisGame 状态），需要保证实现上述接口；
+      iterations: MCTS 迭代次数；
+      rollout_depth: 每次模拟的最大深度（回合数）。
+    返回：
+      最优的落子动作（例如 (x, y, o)），供当前回合落子使用。
+    """
+    root_node = MCTSNode(deepcopy(root_state), player=root_state.currBotColor)
+
+    iterations = 20
+    for i in range(iterations):
+        node = root_node
+
+        # ===== 选择阶段 =====
+        # 如果当前节点子节点全部被探索完毕 就选择一个最优子节点
+        # 最优子节点的选择是探索和利用加权后的结果
+        while node.children and node.is_fully_expanded():
+            node = node.best_child()
+
+        # ===== 扩展阶段 =====
+        # 遇到子节点没有被完全探索完毕的节点 进行探索
+        if not node.is_fully_expanded():
+            child = node.expand()
+            if child:
+                node = child
+
+        # ===== 模拟阶段 =====
+        # 随机模拟三个回合 以模拟后的结果作为当前局面的权值
+        value = rollout(node.state, rollout_depth)
+
+        # ===== 反向传播阶段 =====
+        node.backpropagate(value)
+
+    # 选择访问次数最多或利用值最高的子节点作为最终动作
+    best_node = root_node.best_child(exploration=0)
+    return best_node.move if best_node is not None else None
 
 
 def main():
@@ -452,8 +719,9 @@ def main():
     tetris.enemyColor = 1 - tetris.currBotColor
 
     nextTypeForColor = [blockType, blockType]
-    tetris.typeCountForColor[0][blockType] +=1
-    tetris.typeCountForColor[1][blockType] +=1
+    tetris.typeCountForColor[0][blockType] += 1
+    tetris.typeCountForColor[1][blockType] += 1
+    tetris.currBlockType[0] = tetris.currBlockType[1] = blockType
 
     # 处理历史回合
     for i in range(1, turnID):
@@ -469,6 +737,7 @@ def main():
         tetris.place()
         tetris.typeCountForColor[tetris.enemyColor][bt] += 1
         nextTypeForColor[tetris.enemyColor] = bt
+        tetris.nextBlockType[tetris.enemyColor] = bt
 
         # 读取敌方上一步操作
         enemyAct = list(map(int, lines[ptr].split()))
@@ -480,11 +749,13 @@ def main():
         tetris.place()
         tetris.typeCountForColor[tetris.currBotColor][bt] += 1
         nextTypeForColor[tetris.currBotColor] = bt
+        tetris.nextBlockType[tetris.currBotColor] = bt
 
         # 消除行和转移处理
         tetris.eliminate(0)
         tetris.eliminate(1)
         tetris.transfer()
+        tetris.updateBlock()
 
 
     # 当前回合决策
@@ -492,23 +763,7 @@ def main():
     tetris.setBlock(nextTypeForColor[tetris.currBotColor])
 
     # 选择落点
-    finalX, finalY, finalO = tetris.findBestSpot()
-
-    # 选择给对方的方块类型
-    maxCount = max(tetris.typeCountForColor[tetris.enemyColor])
-    minCount = min(tetris.typeCountForColor[tetris.enemyColor])
-
-    blockForEnemy = -1
-    if maxCount - minCount == 2:
-        # 如果某种方块太多，选择非最大数量的方块
-        for bt in range(7):
-            if tetris.typeCountForColor[tetris.enemyColor][bt] != maxCount:
-                blockForEnemy = bt
-                break
-    else:
-        # 随机选择，但避免连续给同一种方块
-        lastGiven = nextTypeForColor[tetris.enemyColor]
-        blockForEnemy = random.choice([i for i in range(7) if i != lastGiven or random.random() < 0.3])
+    finalX, finalY, finalO, blockForEnemy = mcts_search(tetris)
 
     # 输出决策(方块类型, x, y, 旋转状态)
     print(f"{blockForEnemy} {finalX} {finalY} {finalO}")
